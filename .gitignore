@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data / outputs
+data/sample_videos/*.mp4
+data/sample_videos/*.avi
+data/sample_videos/*.mkv
+output/
+*.avi
+*.mp4
+
+# Model weights — large binaries, never commit
+models/*.pt
+models/*.pth
+models/*.onnx
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

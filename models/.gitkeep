@@ -1,0 +1,2 @@
+# Model weights are downloaded here automatically at first run.
+# *.pt files are gitignored — do not commit large model binaries.

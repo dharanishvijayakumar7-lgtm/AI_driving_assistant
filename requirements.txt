@@ -1,0 +1,17 @@
+# Core video pipeline (Day 1)
+opencv-python>=4.8.0
+pyyaml>=6.0.1
+numpy>=1.24.0
+
+# Object detection (Day 2)
+# NOTE for CPU-only systems: install PyTorch separately FIRST to avoid
+# downloading the massive CUDA build (~2.5 GB). Run:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# Then run: pip install -r requirements.txt
+ultralytics>=8.0.0
+
+# Multi-object tracking — supervision for Detections API, trackers for ByteTrack (Day 2)
+# Note: sv.ByteTrack was deprecated in supervision 0.28; we use ByteTrackTracker from
+# the dedicated `trackers` package (the new official home from Roboflow).
+supervision>=0.21.0
+trackers>=2.5.0
