@@ -114,3 +114,33 @@ lanes:
   # Number of past frames to average lane lines over.
   # Higher = smoother overlay, but slower to react to actual lane changes.
   smoothing_frames: 7
+
+# ============================================================
+# Day 4: Monocular Depth Estimation
+# ============================================================
+depth:
+  # Model variant. Options:
+  #   "midas_small"  — Fastest (~2 MB weights), good for real-time on CPU.
+  #   "midas_hybrid" — Better quality (~120 MB), noticeably slower on CPU.
+  #   "midas_large"  — Best quality (~1.2 GB), impractical without a GPU.
+  # Weights are downloaded automatically via torch.hub on first run.
+  model_name: "midas_small"
+
+  # Internal inference resolution. The model resizes frames to this size
+  # before running depth estimation, then upscales back to frame size.
+  # Lower = faster but coarser depth maps. 256 is a good CPU default.
+  # GPU users can increase to 384 or 512 for sharper edges.
+  input_resolution: 256
+
+  # Inference device. "auto" detects CUDA if available, falls back to CPU.
+  device: "auto"
+
+  # Heuristic scale factor for converting relative depth → pseudo-meters.
+  # This is NOT a physically derived calibration — it's a rough approximation.
+  # Tune it so that a car ~10 m ahead reads approximately "~10m" on screen.
+  # Typical values: 20–50 depending on camera FOV and mounting height.
+  calibration_scale: 30.0
+
+  # Show the colorized depth heatmap as a picture-in-picture overlay
+  # in the bottom-right corner of the display.
+  show_heatmap_overlay: true

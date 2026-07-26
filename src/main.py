@@ -48,7 +48,7 @@ def main() -> None:
     )
     logger = get_logger(__name__)
     logger.info("=" * 60)
-    logger.info("AI Driving Assistant — Day 3: Detection + Tracking + Lane Detection")
+    logger.info("AI Driving Assistant — Day 4: Detection + Tracking + Lanes + Depth")
     logger.info("=" * 60)
 
     # ------------------------------------------------------------------
@@ -79,6 +79,14 @@ def main() -> None:
     if "lanes" in config:
         from src.lanes.stage import LaneDetectionStage
         processor.add_stage("lanes", LaneDetectionStage(config["lanes"]))
+
+    # ── Day 4 addition ───────────────────────────────────────────────
+    # ⚠️  ORDER MATTERS: DepthEstimationStage MUST run AFTER DetectionStage
+    # because it reads meta["tracked_objects"] to compute per-object distance
+    # estimates. Moving it before detection will produce zero distances.
+    if "depth" in config:
+        from src.depth.stage import DepthEstimationStage
+        processor.add_stage("depth", DepthEstimationStage(config["depth"]))
     # ─────────────────────────────────────────────────────────────────
 
     # ------------------------------------------------------------------
