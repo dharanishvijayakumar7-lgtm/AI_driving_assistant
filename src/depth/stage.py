@@ -59,10 +59,23 @@ class DepthEstimationStage:
         self._estimator = DepthEstimator(config)
         self._calibration_scale = config.get("calibration_scale", 30.0)
         self._show_heatmap = config.get("show_heatmap_overlay", True)
+
+        # ── Frame-skip: run MiDaS every N frames, reuse cached result ────
+        # MiDaS on CPU takes ~1-2 s per frame. Skipping N-1 frames between
+        # inference runs is the single biggest FPS lever available without
+        # switching to a faster model. depth=3 means ~3x FPS improvement
+        # with only slightly stale distances (imperceptible at 1-3 fps).
+        self._skip_frames: int = max(1, config.get("skip_frames", 3))
+        self._frame_count: int = 0
+        self._cached_depth_map: np.ndarray | None = None    # last inference result
+        self._cached_depth_colored: np.ndarray | None = None
+
         logger.info(
-            "DepthEstimationStage ready (calibration_scale=%.1f, show_heatmap=%s).",
+            "DepthEstimationStage ready (calibration_scale=%.1f, "
+            "show_heatmap=%s, skip_frames=%d).",
             self._calibration_scale,
             self._show_heatmap,
+            self._skip_frames,
         )
 
     def __call__(
@@ -73,6 +86,7 @@ class DepthEstimationStage:
 
         Pipeline:
             1. DepthEstimator.estimate()         → raw relative depth map
+               (skipped on non-keyframes; cached map reused instead)
             2. For each tracked object:
                a. estimate_object_distance()     → median relative depth in bbox
                b. relative_to_pseudo_meters()    → heuristic metric distance
@@ -89,8 +103,25 @@ class DepthEstimationStage:
             (frame, meta) — meta now includes "depth_map" and each tracked
             object has an ``estimated_distance_m`` attribute.
         """
-        # 1. Run depth estimation on the raw-ish frame
-        depth_map = self._estimator.estimate(frame)
+        self._frame_count += 1
+
+        # ── 1. Run depth inference (or reuse cache) ───────────────────────
+        # Only run the expensive MiDaS model on keyframes; reuse the cached
+        # depth map on in-between frames. This is safe because:
+        #   - Objects rarely move > 1-2 m between consecutive frames at 1-3 fps.
+        #   - The distance is used for TTC estimation which already smooths over
+        #     several frames, so a slightly stale depth doesn't matter.
+        is_keyframe = (self._frame_count % self._skip_frames == 1)
+
+        if is_keyframe or self._cached_depth_map is None:
+            depth_map = self._estimator.estimate(frame)
+            depth_colored = colorize_depth_map(depth_map)
+            self._cached_depth_map = depth_map
+            self._cached_depth_colored = depth_colored
+        else:
+            # Reuse cached result — no neural network call this frame
+            depth_map = self._cached_depth_map
+            depth_colored = self._cached_depth_colored
 
         # 2. Enrich each tracked object with estimated distance
         tracked_objects = meta.get("tracked_objects", [])
@@ -105,8 +136,7 @@ class DepthEstimationStage:
             # its source file, as required by the Day 4 spec.
             obj.estimated_distance_m = distance_m
 
-        # 3. Colorize depth map for visualization
-        depth_colored = colorize_depth_map(depth_map)
+        # 3. Store colorized map in meta
         meta["depth_map"] = depth_colored
 
         # 4. Draw picture-in-picture depth heatmap overlay
@@ -117,8 +147,8 @@ class DepthEstimationStage:
         frame = self._draw_distance_labels(frame, tracked_objects)
 
         logger.debug(
-            "DepthEstimationStage: %d objects enriched with distance.",
-            len(tracked_objects),
+            "DepthEstimationStage: %d objects enriched (keyframe=%s).",
+            len(tracked_objects), is_keyframe,
         )
         return frame, meta
 

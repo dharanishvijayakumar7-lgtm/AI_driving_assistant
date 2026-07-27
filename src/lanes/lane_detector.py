@@ -43,13 +43,25 @@ class LaneResult:
         lane_offset_normalized: [-1.0, 1.0] — ±1 means car is at a lane edge.
         left_detected:         True if this frame produced a raw left line fit.
         right_detected:        True if this frame produced a raw right line fit.
+        raw_hough_count:       Total segments returned by HoughLinesP (before
+                               any slope filtering). 0 → Hough found nothing at
+                               all; likely ROI misplaced or Canny thresholds too
+                               high.
+        left_seg_count:        Segments that survived slope filtering as left-
+                               lane candidates.
+        right_seg_count:       Segments that survived slope filtering as right-
+                               lane candidates.
     """
-    left_line: Optional[tuple[int, int, int, int]] = None
-    right_line: Optional[tuple[int, int, int, int]] = None
-    lane_offset_pixels: float = 0.0
+    left_line:              Optional[tuple[int, int, int, int]] = None
+    right_line:             Optional[tuple[int, int, int, int]] = None
+    lane_offset_pixels:     float = 0.0
     lane_offset_normalized: float = 0.0
-    left_detected: bool = False
-    right_detected: bool = False
+    left_detected:          bool  = False
+    right_detected:         bool  = False
+    # ── Diagnostic counts (populated by detect(), used by stage debug log) ─
+    raw_hough_count:        int   = 0
+    left_seg_count:         int   = 0
+    right_seg_count:        int   = 0
 
 
 class LaneDetector:
@@ -153,6 +165,11 @@ class LaneDetector:
         left_raw  = fit_lane_line(left_segs,  y_bottom, y_top)
         right_raw = fit_lane_line(right_segs, y_bottom, y_top)
 
+        # Diagnostic counts — stored on the result so stage.py can log them
+        raw_hough_count  = len(lines) if lines is not None else 0
+        left_seg_count   = len(left_segs)
+        right_seg_count  = len(right_segs)
+
         # ── 6. Update smoothing buffers ──────────────────────────────────
         # Only add to buffer when this frame actually detected the line;
         # stale frames coast on whatever is already in the buffer.
@@ -182,6 +199,9 @@ class LaneDetector:
             lane_offset_normalized=offset_norm,
             left_detected=left_raw is not None,
             right_detected=right_raw is not None,
+            raw_hough_count=raw_hough_count,
+            left_seg_count=left_seg_count,
+            right_seg_count=right_seg_count,
         )
 
     # ------------------------------------------------------------------

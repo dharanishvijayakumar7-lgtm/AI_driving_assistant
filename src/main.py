@@ -48,7 +48,7 @@ def main() -> None:
     )
     logger = get_logger(__name__)
     logger.info("=" * 60)
-    logger.info("AI Driving Assistant — Day 4: Detection + Tracking + Lanes + Depth")
+    logger.info("AI Driving Assistant — Day 6: Detection + Lanes + Depth + Fusion + Alerts")
     logger.info("=" * 60)
 
     # ------------------------------------------------------------------
@@ -78,7 +78,14 @@ def main() -> None:
     # ── Day 3 addition ───────────────────────────────────────────────
     if "lanes" in config:
         from src.lanes.stage import LaneDetectionStage
-        processor.add_stage("lanes", LaneDetectionStage(config["lanes"]))
+        # Inject visualization toggle so LaneDetectionStage can honour
+        # the demo-mode show_lane_overlay flag from the visualization section.
+        lanes_cfg = dict(config["lanes"])
+        lanes_cfg.setdefault(
+            "show_lane_overlay",
+            config.get("visualization", {}).get("show_lane_overlay", True),
+        )
+        processor.add_stage("lanes", LaneDetectionStage(lanes_cfg))
 
     # ── Day 4 addition ───────────────────────────────────────────────
     # ⚠️  ORDER MATTERS: DepthEstimationStage MUST run AFTER DetectionStage
@@ -86,8 +93,50 @@ def main() -> None:
     # estimates. Moving it before detection will produce zero distances.
     if "depth" in config:
         from src.depth.stage import DepthEstimationStage
-        processor.add_stage("depth", DepthEstimationStage(config["depth"]))
+        # visualization.show_depth_panel maps to depth.show_heatmap_overlay.
+        # We override so the demo-mode toggle works without editing depth/stage.py.
+        depth_cfg = dict(config["depth"])
+        depth_cfg["show_heatmap_overlay"] = config.get("visualization", {}).get(
+            "show_depth_panel", depth_cfg.get("show_heatmap_overlay", True)
+        )
+        processor.add_stage("depth", DepthEstimationStage(depth_cfg))
+
+    # ── Day 5 addition ───────────────────────────────────────────────
+    # ⚠️  FULL DEPENDENCY CHAIN — CollisionFusionStage is the FIRST stage
+    # that depends on ALL previous stages' outputs:
+    #   1. DetectionStage       → meta["tracked_objects"] (track IDs, boxes)
+    #   2. LaneDetectionStage   → meta["lane_lines"]      (ego lane bounds)
+    #   3. DepthEstimationStage → obj.estimated_distance_m (per-object dist)
+    #   4. CollisionFusionStage → fuses 1+2+3 over time → risk annotations
+    # This stage MUST be registered LAST. Moving it earlier will produce
+    # missing data and incorrect/absent risk estimates.
+    if "fusion" in config:
+        from src.fusion.stage import CollisionFusionStage
+        processor.add_stage("fusion", CollisionFusionStage(config["fusion"]))
+
+    # ── Day 6 addition ───────────────────────────────────────────────
+    # ⚠️  AlertStage MUST run LAST in the pipeline. It reads the complete
+    # risk annotations from CollisionFusionStage and uses them to:
+    #   - Evaluate the debounced alert state machine
+    #   - Draw the warning banner and polished context-sensitive labels
+    #   - Write meta["active_alert"] and meta["viz_config"] for draw_hud()
+    if "alerts" in config:
+        from src.alerts.stage import AlertStage
+        processor.add_stage(
+            "alerts",
+            AlertStage(
+                config=config["alerts"],
+                viz_config=config.get("visualization", {}),
+            ),
+        )
     # ─────────────────────────────────────────────────────────────────
+
+    # ── Stage list confirmation ───────────────────────────────────────
+    # Print every registered stage name + position so we can confirm
+    # the full pipeline is wired correctly before the first frame runs.
+    logger.info("Pipeline stages registered (%d total):", len(processor.stage_names))
+    for i, name in enumerate(processor.stage_names, start=1):
+        logger.info("  %d. %s", i, name)
 
     # ------------------------------------------------------------------
     # 5. Prepare the display window

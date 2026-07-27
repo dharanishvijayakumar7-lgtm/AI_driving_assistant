@@ -84,36 +84,35 @@ detection:
 # ============================================================
 lanes:
   # Canny edge detection thresholds.
-  # Low/high ratio ~1:3 is a common starting point.
-  # Decrease both if lanes aren't detected; increase if too many false edges.
-  canny_low_threshold: 50
-  canny_high_threshold: 150
+  # Lower values = more edges detected (more sensitive to faint lane markings).
+  # If lanes still don't appear, try canny_low: 20, canny_high: 60.
+  canny_low_threshold: 30
+  canny_high_threshold: 80
 
   # Gaussian blur kernel size (must be an odd number).
-  # Higher = more noise removed, but also blurs true lane edges.
   blur_kernel_size: 5
 
   # ROI trapezoid — four points as [x_fraction, y_fraction] of frame size.
   # Order: bottom-left, bottom-right, top-right, top-left.
-  # Tune these if your dashcam has a different field of view (hood visible,
-  # very wide-angle, etc.).
   roi_trapezoid:
-    - [0.05, 1.00]   # bottom-left
-    - [0.95, 1.00]   # bottom-right
-    - [0.60, 0.60]   # top-right  (horizon area)
-    - [0.40, 0.60]   # top-left   (horizon area)
+    - [0.02, 1.00]   # bottom-left  (wider to catch edge lane marks)
+    - [0.98, 1.00]   # bottom-right
+    - [0.62, 0.58]   # top-right
+    - [0.38, 0.58]   # top-left
 
-  # Hough transform tuning.
-  # hough_threshold:      minimum votes to accept a line (lower = more lines)
-  # hough_min_line_length: discard segments shorter than this (pixels)
-  # hough_max_line_gap:    bridge gaps in a line up to this many pixels
-  hough_threshold: 30
-  hough_min_line_length: 50
-  hough_max_line_gap: 100
+  # Hough transform — lowered so shorter/fainter lines are accepted.
+  hough_threshold: 15
+  hough_min_line_length: 25
+  hough_max_line_gap: 150
 
-  # Number of past frames to average lane lines over.
-  # Higher = smoother overlay, but slower to react to actual lane changes.
+  # Temporal smoothing (frames to average over).
   smoothing_frames: 7
+
+  # Debug overlay: set true to see Canny edges + ROI outline on screen.
+  debug_overlay: false
+
+  # Show the green lane fill and lines overlay.
+  show_lane_overlay: true
 
 # ============================================================
 # Day 4: Monocular Depth Estimation
@@ -144,3 +143,87 @@ depth:
   # Show the colorized depth heatmap as a picture-in-picture overlay
   # in the bottom-right corner of the display.
   show_heatmap_overlay: true
+
+  # Run MiDaS inference only every N frames; reuse the cached depth map
+  # for the in-between frames. This is the single biggest CPU FPS lever:
+  #   skip_frames: 1  → run every frame  (~0.7 fps on CPU)
+  #   skip_frames: 3  → run every 3rd    (~2.5 fps on CPU)  ← default
+  #   skip_frames: 5  → run every 5th    (~3.5 fps on CPU)
+  # Distances update slightly less frequently but TTC smoothing absorbs this.
+  skip_frames: 3
+
+# ============================================================
+# Day 5: Temporal Fusion — Closing Speed, TTC & Collision Risk
+# ============================================================
+fusion:
+  # Number of frames of distance history to keep per tracked object.
+  # More frames = smoother closing-speed estimates, but slower to react
+  # to sudden speed changes. 10 frames at 30 fps ≈ 0.33 s of history.
+  history_length: 10
+
+  # Expire stale track histories after this many seconds without update.
+  # Prevents ghost entries from objects that left the frame. Should be
+  # longer than the tracker's lost_track_buffer / frame_rate.
+  history_timeout_seconds: 2.0
+
+  # TTC thresholds for risk classification (seconds).
+  # TTC < danger  → DANGER   (object will reach us in < 2 s)
+  # TTC < caution → CAUTION  (2–4 s window)
+  # TTC ≥ caution → SAFE     (comfortable margin)
+  ttc_danger_threshold: 2.0
+  ttc_caution_threshold: 4.0
+
+  # Minimum data points required before trusting a TTC estimate.
+  # At least 3 points are needed for a meaningful linear fit — with
+  # 1-2 noisy points the slope estimate is unreliable.
+  min_history_points: 3
+
+# ============================================================
+# Day 6: Alert System — Debounce, Priority & Sound
+# ============================================================
+alerts:
+  # DANGER must persist this many consecutive frames before triggering the
+  # driver-facing alert. This prevents single-frame noise spikes from
+  # triggering false alarms. At 30 fps, 5 frames = ~167 ms of persistence.
+  danger_persist_frames: 5
+
+  # Once triggered, the alert must see this many consecutive clear frames
+  # before it dismisses. Asymmetry (5 to trigger, 10 to clear) is intentional:
+  # it's safer to keep the warning visible slightly longer than to dismiss too
+  # quickly while the driver is still processing the threat.
+  clear_persist_frames: 10
+
+  # Play a short audio beep (880 Hz sine wave) when a new DANGER alert
+  # triggers. Requires: pip install sounddevice
+  # Set to false for headless environments or silent demo recordings.
+  sound_enabled: false
+
+# ============================================================
+# Day 6: Visualization Toggles — Debug Mode vs Demo Mode
+# ============================================================
+# These flags let you switch between two views without restarting:
+#
+#   DEBUG MODE (all true) — full information for development:
+#     - FPS counter visible
+#     - Depth heatmap PIP in bottom-right corner
+#     - Lane fill + lane lines overlaid on the road
+#
+#   DEMO MODE (all false except show_fps) — clean portfolio recording:
+#     - No depth heatmap clutter
+#     - No lane fill overlay
+#     - Just detection boxes, risk labels, and the collision warning banner
+#
+# Tip: record your demo video with show_depth_panel and show_lane_overlay
+# set to false for a polished, presentation-ready output.
+visualization:
+  # Show/hide the FPS counter in the top-left HUD strip.
+  show_fps: true
+
+  # Show/hide the colorized depth heatmap picture-in-picture overlay.
+  # Note: the depth MODEL still runs; this only hides the on-screen panel.
+  # Controlled here (not under depth:) so both toggles are in one place.
+  show_depth_panel: true
+
+  # Show/hide the translucent lane fill and lane line overlays.
+  # Set to false for a cleaner demo view that focuses on the alert system.
+  show_lane_overlay: true

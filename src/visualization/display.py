@@ -1,11 +1,19 @@
 """
 display.py — Frame rendering, HUD, and all visual overlays.
 
-Visual design (Day 3 polish):
+Visual design (Day 6 polish):
   - Top HUD bar: FPS + object counts + lane status in one semi-transparent strip.
-  - Bounding boxes: single-pass glow blend, then sharp outline + minimal label.
-  - Lane overlay: translucent fill, bright lines, offset gauge in HUD.
-  - No floating text anywhere on the video — everything lives in the HUD.
+    FPS is conditionally shown based on viz_config["show_fps"] from meta.
+  - Active alert indicator badge in HUD (compact) when AlertStage fires.
+  - Bounding boxes: drawn by AlertStage with context-sensitive detail levels.
+  - Lane overlay: translucent fill + bright lines (toggle via viz_config).
+  - Visualization toggles (show_fps, show_depth_panel, show_lane_overlay) flow
+    from config.yaml → AlertStage → meta["viz_config"] → here.
+
+Demo mode (all debug overlays off):
+    Set visualization.show_depth_panel and visualization.show_lane_overlay to
+    false in config.yaml for a clean recording-ready view with just the
+    detection boxes and the collision alert banner.
 """
 
 from typing import TYPE_CHECKING, Any, Optional
@@ -117,14 +125,19 @@ def draw_hud(
 ) -> None:
     """
     Draw a semi-transparent top panel containing:
-      - FPS counter (left)
+      - FPS counter (left) — hidden in demo mode via viz_config["show_fps"]
       - Object count summary (center)
-      - Lane status (right)
-      - Offset gauge bar (below text)
+      - Lane status + offset gauge (right)
+      - Compact alert badge when an alert is active
+
+    Reads meta["viz_config"] (written by AlertStage) for toggle flags:
+      show_fps (bool) — hides the FPS counter for a clean demo recording.
 
     Modifies frame in-place.
     """
     h, w = frame.shape[:2]
+    viz_cfg = meta.get("viz_config", {})
+    show_fps = viz_cfg.get("show_fps", True)
 
     # ── Background panel ─────────────────────────────────────────────────────
     overlay = frame.copy()
@@ -136,9 +149,19 @@ def draw_hud(
 
     ty = 28   # text baseline y inside the HUD
 
-    # ── FPS (left) ───────────────────────────────────────────────────────────
-    fps_color = _OFFSET_SAFE if fps >= 15 else _OFFSET_WARN if fps >= 8 else _OFFSET_DANGER
-    _hud_text(frame, f"FPS  {fps:.1f}", (14, ty), fps_color)
+    # ── FPS (left) — toggled by viz_config["show_fps"] ───────────────────────
+    if show_fps:
+        fps_color = _OFFSET_SAFE if fps >= 15 else _OFFSET_WARN if fps >= 8 else _OFFSET_DANGER
+        _hud_text(frame, f"FPS  {fps:.1f}", (14, ty), fps_color)
+
+    # ── Alert indicator badge (left, below FPS) ───────────────────────────────
+    # A compact badge inside the HUD so the operator always knows the alert
+    # state even when the banner is obscured by other content.
+    active_alert = meta.get("active_alert")
+    if active_alert is not None:
+        badge_text = f"! ALERT  {active_alert.seconds_active:.0f}s"
+        badge_color = (0, 40, 220)   # red
+        _hud_text(frame, badge_text, (14, ty + 18), badge_color)
 
     # ── Object counts (center) ───────────────────────────────────────────────
     tracked = meta.get("tracked_objects", [])
