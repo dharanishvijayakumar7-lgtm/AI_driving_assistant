@@ -22,6 +22,7 @@ After this stage runs, the metadata dict carries:
 
 from typing import Any
 
+import cv2
 import numpy as np
 
 from src.depth.depth_estimator import DepthEstimator
@@ -104,14 +105,11 @@ class DepthEstimationStage:
             object has an ``estimated_distance_m`` attribute.
         """
         self._frame_count += 1
-
-        # ── 1. Run depth inference (or reuse cache) ───────────────────────
-        # Only run the expensive MiDaS model on keyframes; reuse the cached
-        # depth map on in-between frames. This is safe because:
-        #   - Objects rarely move > 1-2 m between consecutive frames at 1-3 fps.
-        #   - The distance is used for TTC estimation which already smooths over
-        #     several frames, so a slightly stale depth doesn't matter.
         is_keyframe = (self._frame_count % self._skip_frames == 1)
+        logger.debug(
+            "[DepthEstimationStage] START — frame=%d  keyframe=%s  show_heatmap=%s",
+            self._frame_count, is_keyframe, self._show_heatmap,
+        )
 
         if is_keyframe or self._cached_depth_map is None:
             depth_map = self._estimator.estimate(frame)
@@ -147,8 +145,8 @@ class DepthEstimationStage:
         frame = self._draw_distance_labels(frame, tracked_objects)
 
         logger.debug(
-            "DepthEstimationStage: %d objects enriched (keyframe=%s).",
-            len(tracked_objects), is_keyframe,
+            "[DepthEstimationStage] END — %d objects enriched  keyframe=%s  pip_drawn=%s",
+            len(tracked_objects), is_keyframe, self._show_heatmap,
         )
         return frame, meta
 
@@ -184,17 +182,16 @@ class DepthEstimationStage:
         x2 = x1 + pip_w
         y2 = y1 + pip_h
 
-        # Draw a border around the PIP for visual separation
-        import cv2 as _cv2
+        # Remove deferred import — cv2 is now imported at the module top level
         frame[y1:y2, x1:x2] = pip
-        _cv2.rectangle(frame, (x1 - 1, y1 - 1), (x2 + 1, y2 + 1), (200, 200, 200), 1)
+        cv2.rectangle(frame, (x1 - 1, y1 - 1), (x2 + 1, y2 + 1), (200, 200, 200), 1)
 
         # Label
-        _cv2.putText(
+        cv2.putText(
             frame, "DEPTH",
             (x1 + 4, y1 + 16),
-            _cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-            (255, 255, 255), 1, _cv2.LINE_AA,
+            cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+            (255, 255, 255), 1, cv2.LINE_AA,
         )
 
         return frame

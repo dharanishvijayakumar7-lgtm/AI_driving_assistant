@@ -91,6 +91,11 @@ class VehicleDetector:
         self._conf_threshold: float = config.get("confidence_threshold", 0.4)
         self._device: str = config.get("device", "cpu")
         model_path: str = config.get("model_path", "yolov8n.pt")
+        # imgsz: YOLO internal inference resolution. YOLOv8 letterboxes the
+        # input to this square size before running the model. 640 is the
+        # training default and gives the best accuracy/speed tradeoff.
+        # Reducing to 480 is a ~20% speedup with minimal accuracy impact.
+        self._imgsz: int = config.get("imgsz", 640)
 
         # Map configured class name strings → COCO integer IDs for YOLO's
         # `classes` parameter (which only accepts integer IDs, not strings).
@@ -149,6 +154,7 @@ class VehicleDetector:
             conf=self._conf_threshold,
             classes=self._class_ids,
             device=self._device,
+            imgsz=self._imgsz,
             verbose=False,
         )
         return sv.Detections.from_ultralytics(results[0])

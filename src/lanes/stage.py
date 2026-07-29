@@ -56,6 +56,10 @@ class LaneDetectionStage:
         self, frame: np.ndarray, meta: dict[str, Any]
     ) -> tuple[np.ndarray, dict[str, Any]]:
         self._frame_count += 1
+        logger.debug(
+            "[LaneDetectionStage] START — frame=%d  show_overlay=%s",
+            self._frame_count, self._show_overlay,
+        )
 
         # ── 1. Run detection ─────────────────────────────────────────────
         result = self._detector.detect(frame)
@@ -108,6 +112,13 @@ class LaneDetectionStage:
             from src.visualization.display import draw_lane_overlay
             frame = draw_lane_overlay(frame, result)
 
+        logger.debug(
+            "[LaneDetectionStage] END — left=%s  right=%s  offset_norm=%.3f  overlay_drawn=%s",
+            "OK" if result.left_line else "NONE",
+            "OK" if result.right_line else "NONE",
+            result.lane_offset_normalized,
+            self._show_overlay and (result.left_line is not None or result.right_line is not None),
+        )
         return frame, meta
 
 

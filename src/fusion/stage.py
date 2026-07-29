@@ -125,6 +125,13 @@ class CollisionFusionStage:
         tracked_objects = meta.get("tracked_objects", [])
         lane_lines = meta.get("lane_lines")
 
+        logger.debug(
+            "[CollisionFusionStage] START — frame=%d  objects=%d  lane_lines=%s",
+            self._frame_count,
+            len(tracked_objects),
+            "present" if lane_lines and (lane_lines.get("left") or lane_lines.get("right")) else "absent",
+        )
+
         # ── 1. Update history for each tracked object ────────────────────
         for obj in tracked_objects:
             distance = getattr(obj, "estimated_distance_m", None)
@@ -149,9 +156,13 @@ class CollisionFusionStage:
         # ── 4. Draw risk visualization ──────────────────────────────────
         frame = self._draw_risk_overlays(frame, tracked_objects)
 
+        risk_counts = {}
+        for obj in tracked_objects:
+            r = getattr(obj, "risk_level", "SAFE")
+            risk_counts[r] = risk_counts.get(r, 0) + 1
         logger.debug(
-            "CollisionFusionStage: %d objects analyzed, %d active histories.",
-            len(tracked_objects),
+            "[CollisionFusionStage] END — risk_summary=%s  histories=%d",
+            risk_counts,
             self._history_tracker.active_track_count,
         )
 

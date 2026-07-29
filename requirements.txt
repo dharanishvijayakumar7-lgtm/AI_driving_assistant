@@ -22,3 +22,18 @@ trackers>=2.5.0
 # torch is already installed from Day 2.
 timm>=0.9.0
 
+# FastAPI service layer (Day 7)
+# fastapi      — the web framework; includes Starlette for WebSocket support.
+# uvicorn      — ASGI server to run FastAPI. [standard] pulls in uvloop (Linux)
+#                and httptools for faster I/O; on Windows it falls back to asyncio.
+# websockets   — low-level WebSocket library used by Starlette under the hood.
+#                Explicitly pinned so the version is reproducible.
+# python-multipart — enables FastAPI's Form / File upload parsing. Not used on
+#                Day 7 but included now so a Day 9 "upload a video" route can
+#                be added without an extra install step.
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+

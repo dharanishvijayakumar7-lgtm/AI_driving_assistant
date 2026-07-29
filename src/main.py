@@ -48,7 +48,7 @@ def main() -> None:
     )
     logger = get_logger(__name__)
     logger.info("=" * 60)
-    logger.info("AI Driving Assistant — Day 6: Detection + Lanes + Depth + Fusion + Alerts")
+    logger.info("AI Driving Assistant — Day 8: Full pipeline with resize optimisation")
     logger.info("=" * 60)
 
     # ------------------------------------------------------------------
@@ -67,10 +67,20 @@ def main() -> None:
     # ------------------------------------------------------------------
     processor = FrameProcessor()
 
-    # ── Day 2 addition (the ONLY change from Day 1 main.py) ──────────
-    # Import and register the detection + tracking stage.
-    # Future days will add more stages below this line — main.py never
-    # needs structural changes, only new add_stage() calls.
+    # ── Day 8 addition — Stage 0: pre-resize ─────────────────────────
+    # Resize every frame DOWN to the pipeline working resolution before
+    # any compute-heavy stage sees it.  At 4K input, Canny+Hough alone
+    # cost ~180 ms/frame (49% of total time).  Resizing to 1280×720 first
+    # drops that to ~15 ms and also fixes the lane-detection threshold
+    # mismatch (thresholds were calibrated for ~720p, not 4K).
+    pipeline_cfg = config.get("pipeline", {})
+    resize_w = pipeline_cfg.get("resize_width", 1280)
+    resize_h = pipeline_cfg.get("resize_height", 720)
+    if resize_w and resize_h:
+        from src.pipeline.resize_stage import FrameResizeStage
+        processor.add_stage("resize", FrameResizeStage(width=resize_w, height=resize_h))
+
+    # ── Day 2 addition ────────────────────────────────────────────────
     if "detection" in config:
         from src.detection.stage import DetectionStage
         processor.add_stage("detection", DetectionStage(config["detection"]))

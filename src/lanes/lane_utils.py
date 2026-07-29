@@ -77,7 +77,10 @@ def separate_lines_by_slope(
         return left_segs, right_segs
 
     for line in lines:
-        x1, y1, x2, y2 = line[0]
+        # HoughLinesP output shape is nominally (N, 1, 4) but some OpenCV
+        # builds — especially on large frames — return (N, 4) directly.
+        # flatten()[:4] handles both shapes without an explicit reshape.
+        x1, y1, x2, y2 = line.flatten()[:4]
         if x2 == x1:
             continue  # perfectly vertical — skip to avoid div-by-zero
         slope = (y2 - y1) / (x2 - x1)

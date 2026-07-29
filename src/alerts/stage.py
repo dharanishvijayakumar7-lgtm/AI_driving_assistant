@@ -125,6 +125,10 @@ class AlertStage:
         self._frame_count += 1
 
         tracked_objects = meta.get("tracked_objects", [])
+        logger.debug(
+            "[AlertStage] START — frame=%d  objects=%d",
+            self._frame_count, len(tracked_objects),
+        )
 
         # ── 1. Evaluate alert state ──────────────────────────────────────
         active_alert = self._manager.evaluate(tracked_objects)
@@ -146,8 +150,10 @@ class AlertStage:
         meta["viz_config"] = self._viz
 
         logger.debug(
-            "AlertStage: alert=%s",
+            "[AlertStage] END — alert=%s  banner_drawn=%s  labels_redrawn=%d",
             active_alert.severity if active_alert else "None",
+            active_alert is not None,
+            len(tracked_objects),
         )
         return frame, meta
 

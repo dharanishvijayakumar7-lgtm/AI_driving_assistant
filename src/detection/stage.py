@@ -95,6 +95,7 @@ class DetectionStage:
     def __call__(
         self, frame: np.ndarray, meta: dict[str, Any]
     ) -> tuple[np.ndarray, dict[str, Any]]:
+        logger.debug("[DetectionStage] START — frame shape=%s", frame.shape)
         """
         Run detection + tracking and annotate the frame with bounding boxes.
 
@@ -148,6 +149,8 @@ class DetectionStage:
         frame = draw_detections(frame, tracked_objects)
 
         logger.debug(
-            "DetectionStage: %d objects tracked this frame.", len(tracked_objects)
+            "[DetectionStage] END — tracked_objects=%d  (track_ids=%s)",
+            len(tracked_objects),
+            [o.track_id for o in tracked_objects],
         )
         return frame, meta

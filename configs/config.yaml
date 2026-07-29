@@ -8,10 +8,25 @@ source:
   type: "file"
 
   # Path to the video file (used only when type == "file")
-  file_path: "data/sample_videos/sample.mp4"
+  file_path: "data/sample_videos/sample2.mp4"
 
   # Webcam device index (used only when type == "webcam")
   webcam_index: 0
+
+# ============================================================
+# Day 8: Pipeline working resolution
+# ============================================================
+# Every incoming frame is resized to this resolution BEFORE any stage
+# runs. Benefits:
+#   1. Canny+Hough drop from ~180 ms → ~15 ms (the #1 bottleneck fix).
+#   2. Lane-detection thresholds were calibrated for 720p — running at
+#      4K caused wrong-side lane assignments and noisy Hough output.
+#   3. All downstream stages (YOLO, MiDaS, draw calls) get faster.
+# The display window still uses display.width/height for final output.
+# Set both to null to disable (pass raw source resolution through).
+pipeline:
+  resize_width: 1280
+  resize_height: 720
 
 display:
   # Target window size for display (width x height). Set to null to use source resolution.
@@ -62,6 +77,13 @@ detection:
   # Override with "cpu" or "cuda" to force a specific device.
   device: "auto"
 
+  # YOLOv8 internal inference resolution (square, pixels).
+  # The model letterboxes input to this size regardless of the frame size.
+  # 640 = training default (best accuracy). 480 = ~20% faster, minimal drop.
+  # After the pipeline resize stage, frames are already 1280×720, so the
+  # gain from lowering imgsz is moderate but measurable.
+  imgsz: 640
+
   # ByteTrack tuning parameters
   tracker:
     # Confidence threshold to *activate* (start) a new track.
@@ -84,8 +106,8 @@ detection:
 # ============================================================
 lanes:
   # Canny edge detection thresholds.
-  # Lower values = more edges detected (more sensitive to faint lane markings).
-  # If lanes still don't appear, try canny_low: 20, canny_high: 60.
+  # At 1280x720 (pipeline working resolution after resize stage):
+  #   low=30, high=80 is a good baseline for dashcam footage with road markings.
   canny_low_threshold: 30
   canny_high_threshold: 80
 
@@ -94,16 +116,22 @@ lanes:
 
   # ROI trapezoid — four points as [x_fraction, y_fraction] of frame size.
   # Order: bottom-left, bottom-right, top-right, top-left.
+  # Narrowed slightly from the Day 3 values so the bottom corners don't reach
+  # the extreme frame edges, which at 4K picked up road shoulders and barriers
+  # as false "left"/"right" lane candidates.
   roi_trapezoid:
-    - [0.02, 1.00]   # bottom-left  (wider to catch edge lane marks)
-    - [0.98, 1.00]   # bottom-right
-    - [0.62, 0.58]   # top-right
-    - [0.38, 0.58]   # top-left
+    - [0.08, 1.00]   # bottom-left
+    - [0.92, 1.00]   # bottom-right
+    - [0.58, 0.60]   # top-right
+    - [0.42, 0.60]   # top-left
 
-  # Hough transform — lowered so shorter/fainter lines are accepted.
-  hough_threshold: 15
-  hough_min_line_length: 25
-  hough_max_line_gap: 150
+  # Hough transform.
+  # At 1280x720: min_line_length=40 means a segment must span 40/1280=3.1% of
+  # frame width — this eliminates road-texture noise hits that at 4K (25px=0.65%)
+  # were flooding the classifier and causing left/right swap.
+  hough_threshold: 20
+  hough_min_line_length: 40
+  hough_max_line_gap: 80
 
   # Temporal smoothing (frames to average over).
   smoothing_frames: 7

@@ -11,9 +11,9 @@ Built incrementally over 10 days.
 | ✅ 4 | Done | Monocular depth estimation (MiDaS) + per-object distance |
 | ✅ 5 | Done | Temporal fusion — closing speed, TTC & collision risk |
 | ✅ 6 | Done | Alert system — debounced warnings, visualization polish, demo mode |
-| 7   |      | Performance optimization |
-| 8   |      | Dashboard / HUD overlay |
-| 9   |      | Recording + output video |
+| ✅ 7 | Done | FastAPI backend — WebSocket stream (annotated frames + JSON metadata) |
+| ✅ 8 | Done | FPS optimization + lane detection fix (pipeline resize stage) |
+| 9   |      | Frontend dashboard (React/vanilla JS WebSocket consumer) |
 | 10  |      | Final integration & demo |
 
 ---
@@ -24,29 +24,35 @@ Built incrementally over 10 days.
 ai-driving-assistant/
 ├── src/
 │   ├── main.py                    # Entry point — wires the whole pipeline
+│   ├── run_server.py              # FastAPI server launcher (Day 7)
+│   ├── api/                       # Day 7 ──────────────────────────────
+│   │   ├── app.py                 # FastAPI app instance + CORS + /health
+│   │   ├── websocket_handler.py   # /ws/stream — full pipeline over WebSocket
+│   │   └── schemas.py             # Pydantic models (FramePayload, etc.)
 │   ├── pipeline/
 │   │   ├── video_source.py        # Webcam / video file abstraction
-│   │   └── frame_processor.py    # Pluggable stage-list processing engine
+│   │   ├── frame_processor.py     # Pluggable stage-list processing engine
+│   │   └── resize_stage.py        # Day 8: FrameResizeStage (pre-pipeline resize)
 │   ├── detection/                 # Day 2 ──────────────────────────────
 │   │   ├── detector.py            # YOLOv8 wrapper (VehicleDetector)
 │   │   ├── tracker.py             # ByteTrack wrapper (VehicleTracker)
-│   │   └── stage.py              # DetectionStage: the pipeline adapter
+│   │   └── stage.py               # DetectionStage: the pipeline adapter
 │   ├── lanes/                     # Day 3 ──────────────────────────────
 │   │   ├── lane_detector.py       # Classical CV lane detection
 │   │   ├── lane_utils.py          # Lane math helpers
-│   │   └── stage.py              # LaneDetectionStage: pipeline adapter
+│   │   └── stage.py               # LaneDetectionStage: pipeline adapter
 │   ├── depth/                     # Day 4 ──────────────────────────────
 │   │   ├── depth_estimator.py     # MiDaS monocular depth wrapper
 │   │   ├── depth_utils.py         # Colormap, distance extraction, calibration
-│   │   └── stage.py              # DepthEstimationStage: pipeline adapter
+│   │   └── stage.py               # DepthEstimationStage: pipeline adapter
 │   ├── fusion/                    # Day 5 ──────────────────────────────
 │   │   ├── object_history.py      # Per-track distance/time rolling buffer
 │   │   ├── collision_estimator.py # TTC computation + risk classification
-│   │   └── stage.py              # CollisionFusionStage: pipeline adapter
+│   │   └── stage.py               # CollisionFusionStage: pipeline adapter
 │   ├── alerts/                    # Day 6 ──────────────────────────────
 │   │   ├── alert_manager.py       # Priority, debounce & hysteresis
 │   │   ├── sound_alert.py         # Programmatic beep (numpy sine wave)
-│   │   └── stage.py              # AlertStage: banner + label polish
+│   │   └── stage.py               # AlertStage: banner + label polish
 │   ├── utils/
 │   │   ├── config.py              # YAML config loader + validator
 │   │   └── logger.py              # Centralized logging setup
@@ -112,14 +118,54 @@ No code changes needed.
 
 ## Expected FPS (Benchmarks)
 
-| Hardware | Day 1 | Day 2 (YOLO) | Day 3 (+Lanes) | Day 4 (+Depth) |
-|----------|-------|--------------|-----------------|-----------------|
-| **CPU only** (i5/i7) | ~60+ | 8–15 | 8–14 | **4–8** |
-| **NVIDIA GPU** (RTX 3060+) | ~200+ | 60–120 | 55–110 | **30–60** |
+All measurements taken on **CPU-only** hardware (no GPU). Results will be
+significantly better on any NVIDIA GPU via CUDA.
 
-> Depth estimation is typically the heaviest single-stage compute cost. Using
-> `input_resolution: 256` instead of 384+ is the primary lever to trade depth
-> quality for speed. See the "FPS Impact" section below.
+### Before vs After Day 8 optimizations
+
+**Hardware:** Intel CPU, no GPU — 3840×2160 source video → 1280×720 pipeline working resolution
+
+| Stage | Before (ms) | After (ms) | Speedup | Notes |
+|-------|------------|-----------|---------|-------|
+| *(resize)* | — | 6.3 | — | New stage 0, trivial cost |
+| detection | 68.5 | 55.8 | 1.2× | Smaller input + explicit `imgsz=640` |
+| **lanes** | **182.0** | **18.6** | **9.8×** | Root fix: Canny+Hough on 720p not 4K |
+| depth | 87.6 | 28.5 | 3.1× | skip_frames=3 cache; smaller input to transform |
+| fusion | 0.3 | 0.3 | — | Pure math, always negligible |
+| alerts | 28.4 | 4.3 | 6.6× | Smaller frame = faster draw calls |
+| **TOTAL** | **366.9** | **113.7** | **3.2×** | |
+| **FPS** | **2.73** | **8.79** | **3.2×** | |
+
+> **"Good" CPU FPS context:** At 8-9 FPS CPU-only with YOLO + MiDaS + all overlays,
+> this is at or above the practical ceiling for CPU inference on a full CV pipeline.
+> On an NVIDIA RTX 3060+, expect 30-60 FPS.
+
+### What changes drive each speedup
+
+| Change | File | Impact |
+|--------|------|--------|
+| `FrameResizeStage` (4K → 1280×720) | `resize_stage.py` + `main.py` | **Lane: 9.8×, Alerts: 6.6×** |
+| `hough_min_line_length` 25 → 40 px | `config.yaml` | Removes noise hits, fixes left/right swap |
+| ROI trapezoid narrowed at bottom | `config.yaml` | Excludes road shoulders from Hough input |
+| `detection.imgsz: 640` explicit | `detector.py` + `config.yaml` | 1.2× detection speedup |
+| `depth.skip_frames: 3` (existing) | `config.yaml` | MiDaS only runs every 3rd frame |
+
+---
+
+## Lane Detection — Known Limitations
+
+The lane detector uses **classical computer vision** (Canny + Hough) and works
+best on clear, straight roads with visible painted lane markings. Known failure modes:
+
+| Scenario | Why it fails | Mitigation |
+|----------|-------------|------------|
+| **Sharp curves** | `HoughLinesP` finds straight segments only. On a curve, the fitted line is a chord through the arc and drifts off the marking. | Replace with polynomial fitting or an ML-based lane model (e.g., UFLD). |
+| **Faded / worn markings** | Canny relies on intensity gradients. Faint markings produce weak edges that don't survive the `hough_threshold`. | Lower `canny_low_threshold` or switch to adaptive thresholding. |
+| **Night / low-light footage** | Low contrast → weak Canny edges throughout the ROI. | Requires histogram equalization or CLAHE pre-processing. |
+| **Heavy shadows** | Strong shadow edges cross the ROI and look like lane lines to Hough. | Adaptive thresholding or HSV-based shadow removal. |
+| **Steep hills / uphill slopes** | The fixed ROI trapezoid assumes a flat road. Horizon rises on hills, clipping actual lane lines. | Dynamic ROI estimation (out of scope for classical CV). |
+| **Wet roads / glare** | Specular reflections create high-contrast edges everywhere, flooding Hough with false positives. | Polarization filtering; not addressable in software alone. |
+| **Lane changes** | Only the innermost visible lane per side is selected. Adjacent lanes bleed in during a lane change. | Requires multi-lane geometry modeling. |
 
 ---
 
@@ -149,11 +195,12 @@ Stages are chained: the output of stage N is the input to stage N+1.
 ### ⚠️ Stage ordering matters
 
 ```python
-# main.py — stage registration order
-processor.add_stage("detection", DetectionStage(config["detection"]))   # 1st
-processor.add_stage("lanes",     LaneDetectionStage(config["lanes"]))   # 2nd
-processor.add_stage("depth",     DepthEstimationStage(config["depth"])) # 3rd — needs tracked_objects
-processor.add_stage("fusion",    CollisionFusionStage(config["fusion"]))# 4th — needs ALL above
+# main.py — stage registration order (Day 8)
+processor.add_stage("resize",    FrameResizeStage(1280, 720))              # 0th — pre-scale
+processor.add_stage("detection", DetectionStage(config["detection"]))      # 1st
+processor.add_stage("lanes",     LaneDetectionStage(config["lanes"]))      # 2nd
+processor.add_stage("depth",     DepthEstimationStage(config["depth"]))    # 3rd — needs tracked_objects
+processor.add_stage("fusion",    CollisionFusionStage(config["fusion"]))   # 4th — needs ALL above
 ```
 
 `CollisionFusionStage` is the first stage that depends on **all** prior stages:
@@ -374,21 +421,26 @@ All six stages are fully operational in a single `python src/main.py` run.
 | `source.type` | `file/webcam` | Input source selector |
 | `source.file_path` | string | Path to video file |
 | `source.webcam_index` | int | OS device index for webcam |
+| `pipeline.resize_width` | int/null | Pipeline working width (default 1280) |
+| `pipeline.resize_height` | int/null | Pipeline working height (default 720) |
 | `display.width/height` | int/null | Output window size |
 | `display.window_title` | string | OpenCV window title |
 | `detection.model_path` | string | YOLO weights file (auto-downloaded) |
 | `detection.confidence_threshold` | float | Min detection confidence (0–1) |
 | `detection.classes` | list | COCO classes to detect |
 | `detection.device` | string | `auto`, `cpu`, or `cuda` |
+| `detection.imgsz` | int | YOLO internal inference resolution (default 640) |
 | `detection.tracker.lost_track_buffer` | int | Frames before a track is deleted |
 | `detection.tracker.frame_rate` | int | Source FPS for Kalman motion model |
 | `lanes.canny_low_threshold` | int | Canny edge low threshold |
 | `lanes.canny_high_threshold` | int | Canny edge high threshold |
+| `lanes.hough_min_line_length` | int | Min Hough segment length in pixels (at pipeline resolution) |
 | `lanes.smoothing_frames` | int | Frames to average lane lines over |
 | `depth.model_name` | string | `midas_small`, `midas_hybrid`, or `midas_large` |
 | `depth.input_resolution` | int | Internal inference size (256 recommended for CPU) |
 | `depth.device` | string | `auto`, `cpu`, or `cuda` |
 | `depth.calibration_scale` | float | Heuristic scale for pseudo-metric conversion |
+| `depth.skip_frames` | int | Run MiDaS every N frames, cache otherwise |
 | `fusion.history_length` | int | Frames of distance history per track (default 10) |
 | `fusion.history_timeout_seconds` | float | Expire stale histories after N seconds |
 | `fusion.ttc_danger_threshold` | float | TTC below this = DANGER (seconds) |
