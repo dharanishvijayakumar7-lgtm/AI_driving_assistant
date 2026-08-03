@@ -9,7 +9,7 @@ This module contains three key helpers:
 3. relative_to_pseudo_meters() — Convert relative depth to a rough metric estimate.
 """
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -51,7 +51,7 @@ def colorize_depth_map(
 
 def estimate_object_distance(
     depth_map: np.ndarray,
-    bounding_box: Tuple[int, int, int, int],
+    bounding_box: tuple[int, int, int, int],
 ) -> float:
     """
     Extract a single representative depth value for a tracked object.
@@ -84,6 +84,9 @@ def estimate_object_distance(
         A single float in [0, 1] representing the median depth of the object
         region. Higher = object is closer to the camera.
     """
+    from src.utils.logger import get_logger as _get_logger
+    _log = _get_logger(__name__)
+
     x1, y1, x2, y2 = bounding_box
     h, w = depth_map.shape[:2]
 
@@ -94,6 +97,12 @@ def estimate_object_distance(
     y2 = max(0, min(y2, h - 1))
 
     if x2 <= x1 or y2 <= y1:
+        # Bug 2 diagnostic: this path means the bbox is degenerate
+        # (zero or negative area) after clamping to frame bounds.
+        _log.warning(
+            "[depth] Degenerate bbox after clamp: (%d,%d,%d,%d) on (%dx%d) map → return 0.0",
+            x1, y1, x2, y2, w, h,
+        )
         return 0.0
 
     # Use the inner 60% of the bounding box to reduce edge background leakage
@@ -114,9 +123,26 @@ def estimate_object_distance(
     roi = depth_map[crop_y1:crop_y2, crop_x1:crop_x2]
 
     if roi.size == 0:
+        _log.warning(
+            "[depth] Empty ROI after crop: bbox=(%d,%d,%d,%d) crop=(%d,%d,%d,%d) → return 0.0",
+            x1, y1, x2, y2, crop_x1, crop_y1, crop_x2, crop_y2,
+        )
         return 0.0
 
-    return float(np.median(roi))
+    result = float(np.median(roi))
+
+    # Bug 2 diagnostic: log when the ROI median is near zero (will produce ~200m)
+    if result < 0.01:
+        _log.warning(
+            "[depth] Near-zero median depth %.4f for bbox (%d,%d,%d,%d): "
+            "depth map max=%.4f min=%.4f → will clamp to ~200m. "
+            "Cause: object bbox may be on a flat/sky region of the depth map.",
+            result, x1, y1, x2, y2,
+            float(depth_map.max()), float(depth_map.min()),
+        )
+
+    return result
+
 
 
 def relative_to_pseudo_meters(

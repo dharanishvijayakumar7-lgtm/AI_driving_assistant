@@ -170,15 +170,45 @@ class LaneDetector:
         left_seg_count   = len(left_segs)
         right_seg_count  = len(right_segs)
 
-        # ── 6. Update smoothing buffers ──────────────────────────────────
-        # Only add to buffer when this frame actually detected the line;
-        # stale frames coast on whatever is already in the buffer.
-        if left_raw is not None:
-            self._left_buf.append((left_raw[0], left_raw[2]))  # (x_bot, x_top)
-        if right_raw is not None:
+        # ── 6. Geometric validation before buffering ─────────────────────
+        # ROOT CAUSE OF THE "X-CROSS" BUG:
+        # A left lane line projected from y_bottom up to y_top must converge
+        # rightward (toward the vanishing point at frame center). Therefore:
+        #   x_top > x_bottom  →  VALID left line  (bottom-left, top-right)
+        #   x_top < x_bottom  →  INVALID — this is geometrically a right-side
+        #                        line that got misclassified (noise segment with
+        #                        a marginally negative slope).
+        # Symmetric rule for the right line: x_top must be LEFT of x_bottom.
+        # Discarding invalid fits prevents them from contaminating the
+        # smoothing buffer across multiple frames.
+        left_valid  = (left_raw  is not None) and (left_raw[2]  > left_raw[0])
+        right_valid = (right_raw is not None) and (right_raw[2] < right_raw[0])
+
+        # ── 7. Update smoothing buffers ──────────────────────────────────
+        # Only add to buffer when this frame detected AND validated the line.
+        if left_valid:
+            self._left_buf.append((left_raw[0], left_raw[2]))   # (x_bot, x_top)
+        if right_valid:
             self._right_buf.append((right_raw[0], right_raw[2]))
 
-        # ── 7. Compute smoothed endpoints ────────────────────────────────
+        # Coordinate logging for the first 3 frames that detect both sides.
+        # Enables empirical verification that lines are no longer crossing.
+        # Bug-fix audit: left.x_top should be > left.x_bottom;
+        #                right.x_top should be < right.x_bottom.
+        if not hasattr(self, '_coord_log_count'):
+            self._coord_log_count = 0
+        if self._coord_log_count < 3 and left_raw is not None and right_raw is not None:
+            self._coord_log_count += 1
+            logger.info(
+                "[Lane coords #%d] "
+                "LEFT  raw=(x_bot=%4d, y_bot=%4d, x_top=%4d, y_top=%4d)  valid=%s | "
+                "RIGHT raw=(x_bot=%4d, y_bot=%4d, x_top=%4d, y_top=%4d)  valid=%s",
+                self._coord_log_count,
+                left_raw[0],  left_raw[1],  left_raw[2],  left_raw[3],  left_valid,
+                right_raw[0], right_raw[1], right_raw[2], right_raw[3], right_valid,
+            )
+
+        # ── 8. Compute smoothed endpoints ────────────────────────────────
         left_line  = self._smooth_line(self._left_buf,  y_bottom, y_top)
         right_line = self._smooth_line(self._right_buf, y_bottom, y_top)
 
