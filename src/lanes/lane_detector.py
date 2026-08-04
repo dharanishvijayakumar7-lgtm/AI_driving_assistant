@@ -212,6 +212,30 @@ class LaneDetector:
         left_line  = self._smooth_line(self._left_buf,  y_bottom, y_top)
         right_line = self._smooth_line(self._right_buf, y_bottom, y_top)
 
+        # ── 9. Inter-line crossing guard ──────────────────────────────────
+        # The per-line validation (step 6) ensures each line converges
+        # correctly on its own, but independent smoothing buffers can cause
+        # the LEFT x_top to drift past the RIGHT x_top — forming an X.
+        # Diagnostic logs confirmed this: every frame showed
+        #   left_converges=True  right_converges=True  no_cross_top=False
+        # The fix: after smoothing, reject the pair if they cross at EITHER
+        # endpoint. Clear both buffers so stale data doesn't perpetuate the
+        # cross on subsequent frames.
+        if left_line is not None and right_line is not None:
+            cross_at_top = left_line[2] >= right_line[2]    # left x_top >= right x_top
+            cross_at_bot = left_line[0] >= right_line[0]    # left x_bot >= right x_bot
+            if cross_at_top or cross_at_bot:
+                logger.warning(
+                    "[Lane crossing guard] Smoothed lines cross! "
+                    "LEFT=(x_bot=%d, x_top=%d)  RIGHT=(x_bot=%d, x_top=%d)  "
+                    "Clearing buffers and suppressing this frame.",
+                    left_line[0], left_line[2], right_line[0], right_line[2],
+                )
+                self._left_buf.clear()
+                self._right_buf.clear()
+                left_line = None
+                right_line = None
+
         left_x  = left_line[0]  if left_line  else None
         right_x = right_line[0] if right_line else None
         offset_px, offset_norm = compute_lane_offset(left_x, right_x, w)

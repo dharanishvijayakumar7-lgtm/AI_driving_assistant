@@ -391,6 +391,21 @@ def _build_payload_json(
             )
         )
 
+    # ── Distance verification log (every 30 frames) ─────────────────────
+    # Prove that the JSON distance == the value baked into the video overlay.
+    # Both read from the same obj.estimated_distance_m attribute.
+    if frame_number % 30 == 1 and raw_objects:
+        dist_pairs = [
+            f"#{getattr(o, 'track_id', '?')}:"
+            f"attr={getattr(o, 'estimated_distance_m', None)}"
+            for o in raw_objects[:5]  # cap at 5 objects to avoid log spam
+        ]
+        logger.info(
+            "[Distance verify] frame=%d — obj distances (same value in JPEG overlay + JSON): %s",
+            frame_number,
+            "  ".join(dist_pairs),
+        )
+
     # ── 4. Extract alert ──────────────────────────────────────────────────
     raw_alert = frame_meta.get("active_alert")
     alert_schema: Optional[AlertSchema] = None

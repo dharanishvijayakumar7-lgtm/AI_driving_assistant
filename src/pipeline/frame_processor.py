@@ -103,6 +103,13 @@ class FrameProcessor:
         logger.warning("Stage '%s' not found; nothing removed.", name)
         return False
 
+    def __init_timing(self) -> None:
+        """Initialize per-stage timing accumulators (lazy init)."""
+        if not hasattr(self, "_timing_accum"):
+            self._timing_accum: dict[str, float] = {}
+            self._timing_frame_count: int = 0
+            self._timing_interval: int = 30
+
     def process(self, frame: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
         """
         Run the frame through every registered stage in order.
@@ -110,6 +117,9 @@ class FrameProcessor:
         Each stage receives the *output* of the previous stage, so they form
         a true pipeline. The shared ``meta`` dict accumulates annotations
         (detections, lane lines, depth maps, risk scores) as stages execute.
+
+        Timing: every 30 frames, logs per-stage millisecond breakdown at INFO
+        level so the FPS bottleneck is immediately visible.
 
         Args:
             frame: The raw BGR frame from VideoSource.get_frame().
@@ -119,14 +129,34 @@ class FrameProcessor:
               - The processed frame (may have overlays drawn on it).
               - The final metadata dict containing all stage outputs.
         """
+        import time as _time
+
+        self.__init_timing()
         meta: dict[str, Any] = {}
 
         for name, stage in self._stages:
             try:
+                t0 = _time.perf_counter()
                 frame, meta = stage(frame, meta)
+                elapsed_ms = (_time.perf_counter() - t0) * 1000
+                self._timing_accum[name] = self._timing_accum.get(name, 0.0) + elapsed_ms
             except Exception as exc:  # noqa: BLE001
                 # Log and skip a failing stage rather than crashing the pipeline.
                 logger.error("Stage '%s' raised an exception and was skipped: %s", name, exc)
+
+        self._timing_frame_count += 1
+
+        if self._timing_frame_count % self._timing_interval == 0:
+            n = self._timing_interval
+            parts = []
+            total = 0.0
+            for sname, _ in self._stages:
+                avg = self._timing_accum.get(sname, 0.0) / n
+                total += avg
+                parts.append(f"{sname}={avg:.1f}ms")
+            parts.append(f"TOTAL={total:.1f}ms")
+            logger.info("[Pipeline timing] last %d frames — %s", n, "  ".join(parts))
+            self._timing_accum.clear()
 
         return frame, meta
 

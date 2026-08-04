@@ -110,6 +110,41 @@ class LaneDetectionStage:
         # ── 5. Normal lane overlay ───────────────────────────────────────
         if self._show_overlay:
             from src.visualization.display import draw_lane_overlay
+            # ── Lane coordinate verification (every 30 frames) ──────────
+            if self._frame_count % 30 == 1:
+                left = result.left_line
+                right = result.right_line
+                if left is not None and right is not None:
+                    # Non-crossing check:
+                    # Left line: x_top (left[2]) should be RIGHT of x_bottom (left[0])
+                    # Right line: x_top (right[2]) should be LEFT of x_bottom (right[0])
+                    # At the bottom, left.x_bottom < right.x_bottom
+                    # At the top, left.x_top < right.x_top
+                    left_ok = left[2] > left[0]   # left x_top > left x_bottom
+                    right_ok = right[2] < right[0] # right x_top < right x_bottom
+                    no_cross_bot = left[0] < right[0]  # left bottom < right bottom
+                    no_cross_top = left[2] < right[2]  # left top < right top
+                    logger.info(
+                        "[Lane verify] frame=%d  "
+                        "LEFT=(x_bot=%d, y_bot=%d, x_top=%d, y_top=%d)  "
+                        "RIGHT=(x_bot=%d, y_bot=%d, x_top=%d, y_top=%d)  "
+                        "left_converges=%s  right_converges=%s  "
+                        "no_cross_bot=%s  no_cross_top=%s  VALID=%s",
+                        self._frame_count,
+                        left[0], left[1], left[2], left[3],
+                        right[0], right[1], right[2], right[3],
+                        left_ok, right_ok, no_cross_bot, no_cross_top,
+                        left_ok and right_ok and no_cross_bot and no_cross_top,
+                    )
+                elif left is not None or right is not None:
+                    logger.info(
+                        "[Lane verify] frame=%d  PARTIAL — left=%s  right=%s",
+                        self._frame_count,
+                        left if left is not None else "NONE",
+                        right if right is not None else "NONE",
+                    )
+                else:
+                    logger.info("[Lane verify] frame=%d  NO LANES DETECTED", self._frame_count)
             frame = draw_lane_overlay(frame, result)
 
         logger.debug(
