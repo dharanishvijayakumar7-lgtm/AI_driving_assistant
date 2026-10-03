@@ -20,6 +20,7 @@ const STATUS_LABELS = {
   connected:    'Connected',
   disconnected: 'Disconnected',
   reconnecting: 'Reconnecting',
+  ended:        'Stream ended',
 }
 
 export default function App() {
@@ -57,7 +58,7 @@ export default function App() {
 
       {/* ── Main feed ──────────────────────────────────────── */}
       {/* AlertBanner sits inside the VideoFeed container (position: absolute) */}
-      <div style={{ position: 'relative', gridArea: 'feed', overflow: 'hidden', display: 'flex' }}>
+      <div className="feed-wrapper" style={{ position: 'relative', gridArea: 'feed', overflow: 'hidden', display: 'flex' }}>
         <VideoFeed
           frameSrc={frameSrc}
           connectionStatus={connectionStatus}

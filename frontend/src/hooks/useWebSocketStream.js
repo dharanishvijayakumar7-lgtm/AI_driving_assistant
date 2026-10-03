@@ -6,7 +6,8 @@
  * Returns:
  *   frameSrc        — data URI for the <img> tag (base64 JPEG), or null
  *   metadata        — the FrameMetadataSchema object from the last message, or null
- *   connectionStatus — "connected" | "disconnected" | "reconnecting"
+ *   connectionStatus — "connected" | "disconnected" | "reconnecting" | "ended"
+ *                      ("ended" = server closed cleanly: the video finished)
  *
  * Reconnection strategy:
  *   Uses exponential backoff with jitter:
@@ -17,7 +18,12 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 
-const WS_URL = 'ws://localhost:8000/ws/stream'
+// Same-origin by default: Vite (dev and preview) proxies /ws to the FastAPI
+// backend on :8000, so the dashboard also works when opened from another
+// machine on the LAN. Set VITE_WS_URL to point at a backend elsewhere.
+const WS_URL =
+  import.meta.env.VITE_WS_URL ??
+  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/stream`
 const MAX_BACKOFF_MS = 30_000
 const BASE_BACKOFF_MS = 1_000
 
@@ -83,15 +89,16 @@ export function useWebSocketStream() {
 
     ws.onclose = (event) => {
       if (!mountedRef.current) return
-      setConnectionStatus('disconnected')
       wsRef.current = null
 
       // Don't reconnect on a clean close from the server (code 1000 = stream ended)
       // but do reconnect on abnormal closes (network drop, server crash, etc.)
       if (event.code === 1000) {
         console.info('[useWebSocketStream] Stream ended cleanly (video finished).')
+        setConnectionStatus('ended')
         return
       }
+      setConnectionStatus('disconnected')
 
       // Exponential backoff with ±20% jitter
       const delay = Math.min(

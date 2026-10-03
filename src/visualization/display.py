@@ -179,9 +179,13 @@ def draw_hud(
     _hud_text(frame, count_str, (w // 2 - cw // 2, ty), _HUD_TEXT_COLOR)
 
     # ── Lane status (right) ──────────────────────────────────────────────────
-    lane_info = meta.get("lane_offset", {})
-    if lane_info:
-        offset = lane_info.get("normalized", 0.0)
+    lane_info = meta.get("lane_offset") or {}
+    offset = lane_info.get("normalized")
+    if offset is None:
+        status_str = "LANE  --"
+        (sw, _), _ = cv2.getTextSize(status_str, _FONT_HUD, _HUD_FONT_SCALE, _HUD_THICKNESS)
+        _hud_text(frame, status_str, (w - sw - 14, ty), (120, 120, 120))
+    else:
         if abs(offset) < 0.2:
             lane_color, lane_label = _OFFSET_SAFE,   "CENTERED"
         elif abs(offset) < 0.5:
@@ -211,6 +215,7 @@ def draw_hud(
 def draw_detections(
     frame: np.ndarray,
     tracked_objects: "list[TrackedObject]",
+    labels: bool = True,
 ) -> np.ndarray:
     """
     Draw glowing bounding boxes with minimal labels.
@@ -220,6 +225,7 @@ def draw_detections(
     blending operations per frame.
 
     Label format: "Car #7"  (class + track ID only — no confidence clutter)
+    Pass labels=False when a later stage (AlertStage) draws the labels.
     """
     if not tracked_objects:
         return frame
@@ -241,6 +247,8 @@ def draw_detections(
         color = _CLASS_COLORS.get(obj.class_name.lower(), _DEFAULT_COLOR)
 
         cv2.rectangle(frame, (obj.x1, obj.y1), (obj.x2, obj.y2), color, _BOX_THICKNESS)
+        if not labels:
+            continue
 
         label = f"{obj.class_name.capitalize()} #{obj.track_id}"
         (lw, lh), bl = cv2.getTextSize(label, _FONT_LABEL, _LABEL_SCALE, 1)

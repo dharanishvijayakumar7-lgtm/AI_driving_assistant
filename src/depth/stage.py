@@ -9,18 +9,32 @@ reads the tracked objects' bounding boxes to enrich them with an
 
 Pipeline position:
     1. DetectionStage       → populates meta["tracked_objects"]
-    2. LaneDetectionStage   → populates meta["lane_lines"], meta["lane_offset"]
+    2. LaneDetectionStage   → populates meta["lane_lines"], meta["vanishing_point"]
     3. DepthEstimationStage → populates meta["depth_map"],
                               enriches each TrackedObject with estimated_distance_m
+
+Distance methods (depth.distance_method in config.yaml):
+    "ground_plane" (default) — Z = f·H / (box_bottom − horizon_row), using the
+        lane stage's vanishing point as the horizon and the configured camera
+        height / field of view. Metric and stable; this is what TTC needs.
+    "midas" — calibration_scale / MiDaS relative inverse depth (median over
+        the box). Kept for comparison: on the sample clips it correlates only
+        weakly with true distance, because MiDaS predicts inverse depth up to
+        an unknown scale AND shift, which per-frame normalisation can't remove.
+    Ground-plane falls back to MiDaS only when no vanishing point is available
+    (lane stage disabled). An object whose contact point is at or above the
+    horizon gets estimated_distance_m = None: it is beyond reliable range.
 
 After this stage runs, the metadata dict carries:
     meta["depth_map"]   = np.ndarray (H, W, 3) — colorized BGR depth heatmap
                           ready for visualization (picture-in-picture overlay).
+                          Absent when MiDaS doesn't run (heatmap hidden and
+                          distance_method is "ground_plane").
     Each object in meta["tracked_objects"] gains:
-        obj.estimated_distance_m = float  — pseudo-metric distance in meters.
+        obj.estimated_distance_m = float  — estimated distance in meters.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -29,6 +43,8 @@ from src.depth.depth_estimator import DepthEstimator
 from src.depth.depth_utils import (
     colorize_depth_map,
     estimate_object_distance,
+    focal_length_px,
+    ground_plane_distance,
     relative_to_pseudo_meters,
 )
 from src.utils.logger import get_logger
@@ -58,8 +74,16 @@ class DepthEstimationStage:
             config: The ``depth`` sub-dict from config.yaml.
         """
         self._estimator = DepthEstimator(config)
-        self._calibration_scale = config.get("calibration_scale", 30.0)
+        self._calibration_scale = config.get("calibration_scale", 8.0)
         self._show_heatmap = config.get("show_heatmap_overlay", True)
+        self._method: str = config.get("distance_method", "ground_plane")
+        if self._method not in ("ground_plane", "midas"):
+            raise ValueError(
+                f"depth.distance_method must be 'ground_plane' or 'midas', got {self._method!r}"
+            )
+        self._camera_height: float = config.get("camera_height_m", 1.2)
+        self._camera_hfov: float = config.get("camera_hfov_deg", 60.0)
+        self._max_distance: float = config.get("max_distance_m", 200.0)
 
         # ── Frame-skip: run MiDaS every N frames, reuse cached result ────
         # MiDaS on CPU takes ~1-2 s per frame. Skipping N-1 frames between
@@ -72,8 +96,11 @@ class DepthEstimationStage:
         self._cached_depth_colored: np.ndarray | None = None
 
         logger.info(
-            "DepthEstimationStage ready (calibration_scale=%.1f, "
-            "show_heatmap=%s, skip_frames=%d).",
+            "DepthEstimationStage ready (method=%s, camera_height=%.2fm, hfov=%.0f°, "
+            "calibration_scale=%.1f, show_heatmap=%s, skip_frames=%d).",
+            self._method,
+            self._camera_height,
+            self._camera_hfov,
             self._calibration_scale,
             self._show_heatmap,
             self._skip_frames,
@@ -87,11 +114,10 @@ class DepthEstimationStage:
 
         Pipeline:
             1. DepthEstimator.estimate()         → raw relative depth map
-               (skipped on non-keyframes; cached map reused instead)
-            2. For each tracked object:
-               a. estimate_object_distance()     → median relative depth in bbox
-               b. relative_to_pseudo_meters()    → heuristic metric distance
-               c. Attach as obj.estimated_distance_m
+               (only when needed; skipped on non-keyframes, cached map reused)
+            2. For each tracked object, attach obj.estimated_distance_m:
+               ground-plane range from the box bottom, or MiDaS
+               (median relative depth in bbox → relative_to_pseudo_meters)
             3. Colorize depth map for visualization
             4. Optionally draw picture-in-picture depth heatmap overlay
 
@@ -111,35 +137,64 @@ class DepthEstimationStage:
             self._frame_count, is_keyframe, self._show_heatmap,
         )
 
-        if is_keyframe or self._cached_depth_map is None:
-            depth_map = self._estimator.estimate(frame)
-            depth_colored = colorize_depth_map(depth_map)
-            self._cached_depth_map = depth_map
-            self._cached_depth_colored = depth_colored
-        else:
-            # Reuse cached result — no neural network call this frame
-            depth_map = self._cached_depth_map
-            depth_colored = self._cached_depth_colored
-
-        # 2. Enrich each tracked object with estimated distance
         tracked_objects = meta.get("tracked_objects", [])
+        h, w = frame.shape[:2]
+        vp = meta.get("vanishing_point")
+        horizon_y: Optional[float] = vp[1] if vp is not None else None
+        focal = focal_length_px(w, self._camera_hfov)
+
+        # ── 1. Ground-plane ranging (no neural network involved) ─────────
+        # An object whose contact point is at/above the horizon gets NO
+        # distance (None) — it is far away, or the road climbs ahead.
+        # Substituting a MiDaS guess there produced jumpy distances and
+        # phantom closing speeds of 30-500 m/s, i.e. false alarms.
+        use_ground_plane = self._method == "ground_plane" and horizon_y is not None
+        # A box bottom below the lowest visible road row (onto the hood, e.g.
+        # via the vehicle's reflection) isn't a ground contact: clamp it.
+        road_bottom = meta.get("road_bottom_y", h - 1)
+        distances: dict[int, Optional[float]] = {}
+        if use_ground_plane:
+            for obj in tracked_objects:
+                distances[id(obj)] = ground_plane_distance(
+                    min(obj.y2, road_bottom), horizon_y, focal, self._camera_height,
+                    max_distance_m=self._max_distance,
+                )
+
+        # ── 2. MiDaS — only run the network when something needs it ──────
+        need_midas = self._show_heatmap or not use_ground_plane
+        depth_map = depth_colored = None
+        if need_midas:
+            if is_keyframe or self._cached_depth_map is None:
+                # Estimate on the un-annotated frame: painted boxes and the
+                # translucent lane fill otherwise corrupt the depth map.
+                depth_map = self._estimator.estimate(meta.get("clean_frame", frame))
+                depth_colored = colorize_depth_map(depth_map)
+                self._cached_depth_map = depth_map
+                self._cached_depth_colored = depth_colored
+            else:
+                # Reuse cached result — no neural network call this frame
+                depth_map = self._cached_depth_map
+                depth_colored = self._cached_depth_colored
+
+        # ── 3. Attach a distance to every tracked object ─────────────────
         for obj in tracked_objects:
-            bbox = (obj.x1, obj.y1, obj.x2, obj.y2)
-            rel_depth = estimate_object_distance(depth_map, bbox)
-            distance_m = relative_to_pseudo_meters(
-                rel_depth, self._calibration_scale
-            )
+            distance_m = distances.get(id(obj))
+            if not use_ground_plane and depth_map is not None:
+                rel_depth = estimate_object_distance(depth_map, (obj.x1, obj.y1, obj.x2, obj.y2))
+                distance_m = min(
+                    relative_to_pseudo_meters(rel_depth, self._calibration_scale),
+                    self._max_distance,
+                )
             # Dynamically add the distance field to the TrackedObject dataclass.
             # This is intentional: we extend the Day 2 dataclass without modifying
             # its source file, as required by the Day 4 spec.
             obj.estimated_distance_m = distance_m
 
-        # 3. Store colorized map in meta
-        meta["depth_map"] = depth_colored
-
-        # 4. Draw picture-in-picture depth heatmap overlay
-        if self._show_heatmap:
-            frame = self._draw_pip_overlay(frame, depth_colored)
+        # ── 4. Store colorized map + draw picture-in-picture heatmap ─────
+        if depth_colored is not None:
+            meta["depth_map"] = depth_colored
+            if self._show_heatmap:
+                frame = self._draw_pip_overlay(frame, depth_colored)
 
         # 5. Update bounding box labels to include distance
         frame = self._draw_distance_labels(frame, tracked_objects)

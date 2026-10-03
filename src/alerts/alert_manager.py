@@ -78,7 +78,7 @@ class ActiveAlert:
     ttc_seconds : float or None
         Current TTC for display in the banner.
     triggered_at : float
-        time.perf_counter() timestamp when the alert first triggered.
+        Frame timestamp (seconds) when the alert first triggered.
     seconds_active : float
         How long this alert has been continuously active (updated each frame).
     """
@@ -140,7 +140,11 @@ class AlertManager:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def evaluate(self, tracked_objects: list[Any]) -> Optional[ActiveAlert]:
+    def evaluate(
+        self,
+        tracked_objects: list[Any],
+        now: Optional[float] = None,
+    ) -> Optional[ActiveAlert]:
         """
         Evaluate all tracked objects and advance the alert state machine.
 
@@ -155,12 +159,18 @@ class AlertManager:
         tracked_objects : list
             TrackedObject instances with risk_level, in_ego_lane, ttc_seconds,
             track_id, class_name attributes (set by CollisionFusionStage).
+        now : float, optional
+            Frame capture time in seconds (meta["timestamp"]), used for the
+            alert's duration. Defaults to time.perf_counter().
 
         Returns
         -------
         ActiveAlert or None
             The current live alert, or None if no alert is active.
         """
+        if now is None:
+            now = time.perf_counter()
+
         # ── 1. Find the most urgent in-lane DANGER threat ────────────────
         best_threat = self._pick_highest_priority(tracked_objects)
 
@@ -178,7 +188,7 @@ class AlertManager:
         if not self._alert_is_live:
             # Not yet triggered — check if we've hit the persist threshold
             if self._danger_counter >= self._danger_persist and best_threat is not None:
-                self._trigger_alert(best_threat)
+                self._trigger_alert(best_threat, now)
         else:
             # Alert is live — check if we should dismiss it
             if self._clear_counter >= self._clear_persist:
@@ -189,9 +199,7 @@ class AlertManager:
 
         # ── 4. Tick seconds_active ────────────────────────────────────────
         if self._active_alert is not None:
-            self._active_alert.seconds_active = (
-                time.perf_counter() - self._active_alert.triggered_at
-            )
+            self._active_alert.seconds_active = now - self._active_alert.triggered_at
 
         return self._active_alert
 
@@ -217,9 +225,8 @@ class AlertManager:
         # Lowest TTC = most urgent threat
         return min(candidates, key=lambda o: o.ttc_seconds)
 
-    def _trigger_alert(self, threat: Any) -> None:
+    def _trigger_alert(self, threat: Any, now: float) -> None:
         """Create a new active alert and optionally play sound."""
-        now = time.perf_counter()
         ttc = threat.ttc_seconds
         label = f"{threat.class_name.capitalize()} #{threat.track_id}"
         ttc_str = f"{ttc:.1f}s" if ttc is not None else "?"

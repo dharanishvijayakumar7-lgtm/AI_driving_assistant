@@ -8,6 +8,7 @@ Why this exists:
   OpenCV capture logic so no other module ever touches `cv2.VideoCapture`.
 """
 
+import time
 from typing import Optional
 
 import cv2
@@ -129,6 +130,8 @@ class VideoSource:
             )
 
         self._metadata = self._read_metadata()
+        self._frames_read: int = 0
+        self._timestamp: float = 0.0
         logger.info("Video source ready: %s", self._metadata)
 
     # ------------------------------------------------------------------
@@ -157,12 +160,32 @@ class VideoSource:
                 )
             return None
 
+        self._frames_read += 1
+        if self._source_type == "file":
+            self._timestamp = (self._frames_read - 1) / self._metadata.fps
+        else:
+            self._timestamp = time.perf_counter()
+
         return frame
 
     @property
     def metadata(self) -> VideoMetadata:
         """Return the cached metadata snapshot for this source."""
         return self._metadata
+
+    @property
+    def timestamp(self) -> float:
+        """
+        Capture time (seconds) of the frame most recently returned by get_frame().
+
+        For video files this is the position in the video (frame index / fps),
+        NOT wall-clock time. That matters for anything measuring motion: the
+        pipeline processes a file far slower than real time on CPU, so using
+        wall-clock deltas would make every object look ~5-20x slower than it
+        is and inflate time-to-collision by the same factor. For webcams the
+        frame really is captured "now", so wall-clock time is correct.
+        """
+        return self._timestamp
 
     def release(self) -> None:
         """

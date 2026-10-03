@@ -30,11 +30,15 @@ class LaneDetectionStage:
     After this stage executes, the metadata dict carries:
       meta["lane_lines"]  = {"left": (x1,y1,x2,y2) | None,
                               "right": (x1,y1,x2,y2) | None}
-      meta["lane_offset"] = {"pixels": float,
-                              "normalized": float}   # [-1,1], + = right drift
+      meta["ego_lane"]    = {"left": (x1,y1,x2,y2), "right": (x1,y1,x2,y2),
+                              "source": "detected" | "partial" | "default"}
+      meta["vanishing_point"] = (x, y) pixel position of the road vanishing point
+      meta["road_bottom_y"]   = lowest image row showing road (ROI bottom)
+      meta["lane_offset"] = {"pixels": float | None,
+                              "normalized": float | None}   # [-1,1], + = right drift
 
-    Future stages (fusion engine, alert system) read from these keys to
-    determine risk without re-running lane detection.
+    The fusion stage reads meta["ego_lane"] to decide which objects are in
+    the car's path, without re-running lane detection.
     """
 
     def __init__(self, config: dict) -> None:
@@ -62,35 +66,18 @@ class LaneDetectionStage:
         )
 
         # ── 1. Run detection ─────────────────────────────────────────────
-        result = self._detector.detect(frame)
+        # Analyse the un-annotated frame — detection boxes already drawn on
+        # `frame` would otherwise show up as Canny edges.
+        result = self._detector.detect(meta.get("clean_frame", frame))
 
-        # ── 2. Emit INFO-level diagnostics every 30 frames ───────────────
-        # Log at INFO (not DEBUG) so these appear with the default logging
-        # level and don't require changing config to see them.
+        # ── 2. Periodic diagnostics (every 30 frames) ────────────────────
         if self._frame_count % 30 == 1:   # frame 1, 31, 61 …
-            raw_hough  = getattr(result, "raw_hough_count",  "?")
-            left_count = getattr(result, "left_seg_count",   "?")
-            right_count= getattr(result, "right_seg_count",  "?")
-
-            ll = meta.get("lane_lines", {})
-            if not ll:
-                ll_state = "not yet written"
-            else:
-                left_val  = result.left_line
-                right_val = result.right_line
-                if left_val is None and right_val is None:
-                    ll_state = "BOTH NONE — no lines detected"
-                elif left_val is None:
-                    ll_state = f"left=NONE  right={right_val}"
-                elif right_val is None:
-                    ll_state = f"left={left_val}  right=NONE"
-                else:
-                    ll_state = f"left={left_val}  right={right_val}  (BOTH OK)"
-
-            logger.info(
-                "[LaneDetectionStage] frame=%d  "
-                "raw_hough=%s  left_segs=%s  right_segs=%s  |  lane_lines: %s",
-                self._frame_count, raw_hough, left_count, right_count, ll_state,
+            logger.debug(
+                "[LaneDetectionStage] frame=%d  raw_hough=%d  left_segs=%d  "
+                "right_segs=%d  left=%s  right=%s  ego=%s",
+                self._frame_count, result.raw_hough_count, result.left_seg_count,
+                result.right_seg_count, result.left_line, result.right_line,
+                result.ego_source,
             )
 
         # ── 3. Write metadata ────────────────────────────────────────────
@@ -98,6 +85,21 @@ class LaneDetectionStage:
             "left":  result.left_line,
             "right": result.right_line,
         }
+        # The corridor used for in-ego-lane checks. Falls back to default
+        # lines through the vanishing point when a side isn't detected, so
+        # collision risk stays lane-aware on roads with poor markings.
+        meta["ego_lane"] = {
+            "left":   result.ego_left,
+            "right":  result.ego_right,
+            "source": result.ego_source,
+        }
+        # Horizon/vanishing point — DepthEstimationStage uses its row for
+        # ground-plane distance estimation.
+        h, w = frame.shape[:2]
+        meta["vanishing_point"] = self._detector.vanishing_point_px(w, h)
+        # Lowest image row that shows road (bottom of the ROI) — below it is
+        # the car's hood, if visible. Ground contact points are clamped to it.
+        meta["road_bottom_y"] = self._detector.road_bottom_px(h)
         meta["lane_offset"] = {
             "pixels":     result.lane_offset_pixels,
             "normalized": result.lane_offset_normalized,
@@ -105,50 +107,15 @@ class LaneDetectionStage:
 
         # ── 4. Debug overlay (Canny edges + ROI outline) ─────────────────
         if self._debug_overlay:
-            frame = _draw_debug_overlay(frame, self._detector)
+            frame = _draw_debug_overlay(frame, self._detector, meta.get("clean_frame", frame))
 
         # ── 5. Normal lane overlay ───────────────────────────────────────
         if self._show_overlay:
             from src.visualization.display import draw_lane_overlay
-            # ── Lane coordinate verification (every 30 frames) ──────────
-            if self._frame_count % 30 == 1:
-                left = result.left_line
-                right = result.right_line
-                if left is not None and right is not None:
-                    # Non-crossing check:
-                    # Left line: x_top (left[2]) should be RIGHT of x_bottom (left[0])
-                    # Right line: x_top (right[2]) should be LEFT of x_bottom (right[0])
-                    # At the bottom, left.x_bottom < right.x_bottom
-                    # At the top, left.x_top < right.x_top
-                    left_ok = left[2] > left[0]   # left x_top > left x_bottom
-                    right_ok = right[2] < right[0] # right x_top < right x_bottom
-                    no_cross_bot = left[0] < right[0]  # left bottom < right bottom
-                    no_cross_top = left[2] < right[2]  # left top < right top
-                    logger.info(
-                        "[Lane verify] frame=%d  "
-                        "LEFT=(x_bot=%d, y_bot=%d, x_top=%d, y_top=%d)  "
-                        "RIGHT=(x_bot=%d, y_bot=%d, x_top=%d, y_top=%d)  "
-                        "left_converges=%s  right_converges=%s  "
-                        "no_cross_bot=%s  no_cross_top=%s  VALID=%s",
-                        self._frame_count,
-                        left[0], left[1], left[2], left[3],
-                        right[0], right[1], right[2], right[3],
-                        left_ok, right_ok, no_cross_bot, no_cross_top,
-                        left_ok and right_ok and no_cross_bot and no_cross_top,
-                    )
-                elif left is not None or right is not None:
-                    logger.info(
-                        "[Lane verify] frame=%d  PARTIAL — left=%s  right=%s",
-                        self._frame_count,
-                        left if left is not None else "NONE",
-                        right if right is not None else "NONE",
-                    )
-                else:
-                    logger.info("[Lane verify] frame=%d  NO LANES DETECTED", self._frame_count)
             frame = draw_lane_overlay(frame, result)
 
         logger.debug(
-            "[LaneDetectionStage] END — left=%s  right=%s  offset_norm=%.3f  overlay_drawn=%s",
+            "[LaneDetectionStage] END — left=%s  right=%s  offset_norm=%s  overlay_drawn=%s",
             "OK" if result.left_line else "NONE",
             "OK" if result.right_line else "NONE",
             result.lane_offset_normalized,
@@ -157,7 +124,11 @@ class LaneDetectionStage:
         return frame, meta
 
 
-def _draw_debug_overlay(frame: np.ndarray, detector: "LaneDetector") -> np.ndarray:
+def _draw_debug_overlay(
+    frame: np.ndarray,
+    detector: "LaneDetector",
+    clean_frame: np.ndarray,
+) -> np.ndarray:
     """
     Draw a diagnostic overlay showing:
       - The raw Canny edge map (white edges on dark background) as a
@@ -176,7 +147,7 @@ def _draw_debug_overlay(frame: np.ndarray, detector: "LaneDetector") -> np.ndarr
     h, w = frame.shape[:2]
 
     # Recompute Canny on the current frame (cheap — just grayscale + blur)
-    gray    = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+    gray    = _cv2.cvtColor(clean_frame, _cv2.COLOR_BGR2GRAY)
     blurred = _cv2.GaussianBlur(gray, (detector._blur_k, detector._blur_k), 0)
     edges   = _cv2.Canny(blurred, detector._canny_low, detector._canny_high)
 
@@ -197,6 +168,10 @@ def _draw_debug_overlay(frame: np.ndarray, detector: "LaneDetector") -> np.ndarr
     pts = np.array(roi_px, dtype=np.int32).reshape((-1, 1, 2))
     _cv2.polylines(frame, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
 
+    # Vanishing point (magenta cross) — lane markings should meet here
+    vp_x, vp_y = (int(v) for v in detector.vanishing_point_px(w, h))
+    _cv2.drawMarker(frame, (vp_x, vp_y), (255, 0, 255), _cv2.MARKER_CROSS, 24, 2)
+
     # Label each ROI corner with its config fraction so you can cross-check
     for i, ((px, py), rp) in enumerate(zip(roi_px, detector._roi_pts)):
         label = f"({rp[0]:.2f},{rp[1]:.2f})"
@@ -207,7 +182,7 @@ def _draw_debug_overlay(frame: np.ndarray, detector: "LaneDetector") -> np.ndarr
 
     # Small legend in top-left (below the HUD strip)
     _cv2.putText(
-        frame, "[LANE DEBUG] green=Canny  cyan=ROI",
+        frame, "[LANE DEBUG] green=Canny  cyan=ROI  magenta=vanishing point",
         (10, 75), _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 200), 1, _cv2.LINE_AA,
     )
 

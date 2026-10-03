@@ -113,7 +113,8 @@ class DetectionStage:
             (annotated_frame, meta) — meta now includes "tracked_objects".
         """
         # 1. Detect
-        sv_detections = self._detector.detect(frame)
+        # Analyse the un-annotated frame (see FrameProcessor.process)
+        sv_detections = self._detector.detect(meta.get("clean_frame", frame))
 
         # 2. Track
         sv_tracked = self._tracker.update(sv_detections)
@@ -132,6 +133,12 @@ class DetectionStage:
                     if sv_tracked.tracker_id is not None
                     else -1
                 )
+                if track_id < 0:
+                    # Tentative track (seen for the first time) — not yet
+                    # confirmed by ByteTrack. It has no stable identity, so
+                    # downstream history/TTC can't use it; it is reported
+                    # from the next frame on, once confirmed.
+                    continue
                 name = class_names.get(class_id, f"class_{class_id}")
                 tracked_objects.append(
                     TrackedObject(
@@ -146,7 +153,8 @@ class DetectionStage:
 
         # 4. Annotate frame (import here to avoid circular imports)
         from src.visualization.display import draw_detections
-        frame = draw_detections(frame, tracked_objects)
+        # Boxes only — AlertStage draws the single, risk-aware label layer.
+        frame = draw_detections(frame, tracked_objects, labels=False)
 
         logger.debug(
             "[DetectionStage] END — tracked_objects=%d  (track_ids=%s)",

@@ -48,7 +48,7 @@ def main() -> None:
     )
     logger = get_logger(__name__)
     logger.info("=" * 60)
-    logger.info("AI Driving Assistant — Day 8: Full pipeline with resize optimisation")
+    logger.info("AI Driving Assistant — OpenCV window mode")
     logger.info("=" * 60)
 
     # ------------------------------------------------------------------
@@ -180,7 +180,7 @@ def main() -> None:
         frame_count += 1
 
         # Pass frame through the processing pipeline
-        processed_frame, frame_meta = processor.process(frame)
+        processed_frame, frame_meta = processor.process(frame, timestamp=source.timestamp)
 
         # Update FPS estimate every 15 frames to keep it stable
         if frame_count % 15 == 0:

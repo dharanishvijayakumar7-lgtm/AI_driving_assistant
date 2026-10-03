@@ -51,22 +51,23 @@ class FrameProcessor:
     stages are just callables registered by name, they can be added, removed,
     or reordered at runtime without any changes to the calling code.
 
-    Current stages (Day 1):
-      - None. process() returns the frame unchanged.
-
-    Planned stages:
-      - "detector"        : YOLO-based object detection (Day 2)
-      - "tracker"         : Multi-object tracking (Day 3)
-      - "lane_detector"   : Lane line detection (Day 4)
-      - "depth_estimator" : Monocular depth estimation (Day 5)
-      - "fusion_engine"   : Cross-module result fusion (Day 6)
-      - "alert_system"    : Collision risk warnings (Day 7)
+    Stages registered by main.py / the WebSocket handler, in order:
+      - "resize"    : FrameResizeStage — downscale to the working resolution
+      - "detection" : YOLOv8 detection + ByteTrack tracking
+      - "lanes"     : Classical lane detection + ego-lane corridor
+      - "depth"     : MiDaS monocular depth → per-object distance
+      - "fusion"    : Closing speed, TTC and collision risk
+      - "alerts"    : Debounced driver alert + final label layer
     """
 
     def __init__(self) -> None:
         # Ordered list of (name, stage) pairs.
         # A list (not a dict) preserves insertion order for deterministic execution.
         self._stages: list[tuple[str, Stage]] = []
+        # Per-stage timing accumulators, logged every _timing_interval frames
+        self._timing_accum: dict[str, float] = {}
+        self._timing_frame_count: int = 0
+        self._timing_interval: int = 30
         logger.debug("FrameProcessor initialized with no stages.")
 
     def add_stage(self, name: str, stage: Stage) -> None:
@@ -103,14 +104,11 @@ class FrameProcessor:
         logger.warning("Stage '%s' not found; nothing removed.", name)
         return False
 
-    def __init_timing(self) -> None:
-        """Initialize per-stage timing accumulators (lazy init)."""
-        if not hasattr(self, "_timing_accum"):
-            self._timing_accum: dict[str, float] = {}
-            self._timing_frame_count: int = 0
-            self._timing_interval: int = 30
-
-    def process(self, frame: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    def process(
+        self,
+        frame: np.ndarray,
+        timestamp: Optional[float] = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         """
         Run the frame through every registered stage in order.
 
@@ -122,7 +120,11 @@ class FrameProcessor:
         level so the FPS bottleneck is immediately visible.
 
         Args:
-            frame: The raw BGR frame from VideoSource.get_frame().
+            frame:     The raw BGR frame from VideoSource.get_frame().
+            timestamp: Capture time of the frame in seconds (pass
+                       VideoSource.timestamp). Stored as meta["timestamp"] so
+                       time-based stages (closing speed, TTC) measure video
+                       time rather than processing time. Defaults to now.
 
         Returns:
             A tuple of:
@@ -131,8 +133,18 @@ class FrameProcessor:
         """
         import time as _time
 
-        self.__init_timing()
-        meta: dict[str, Any] = {}
+        # Stages draw their overlays in place on `frame`, so analysis stages
+        # must not read it: MiDaS would estimate depth on painted boxes and
+        # the lane fill, and Canny would find edges on box outlines. They read
+        # meta["clean_frame"] instead — an un-annotated frame that is never
+        # drawn on. FrameResizeStage replaces it with the resized frame.
+        meta: dict[str, Any] = {
+            "timestamp": timestamp if timestamp is not None else _time.perf_counter(),
+            "clean_frame": frame,
+        }
+        first_stage = self._stages[0][1] if self._stages else None
+        if not getattr(first_stage, "provides_clean_frame", False):
+            frame = frame.copy()   # separate drawing canvas
 
         for name, stage in self._stages:
             try:

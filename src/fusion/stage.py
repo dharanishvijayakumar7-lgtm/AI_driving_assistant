@@ -4,20 +4,21 @@ stage.py — CollisionFusionStage: FrameProcessor-compatible adapter for
 
 ⚠️  DEPENDENCY CHAIN (this is the first stage that depends on ALL previous):
     1. DetectionStage       → meta["tracked_objects"]  (track IDs, bounding boxes)
-    2. LaneDetectionStage   → meta["lane_lines"]       (ego lane boundaries)
+    2. LaneDetectionStage   → meta["ego_lane"]         (ego lane corridor)
     3. DepthEstimationStage → enriches TrackedObject with estimated_distance_m
     4. CollisionFusionStage → (THIS STAGE) reads all of the above, produces
                               closing_speed_mps, ttc_seconds, risk_level,
                               in_ego_lane on each tracked object.
 
-This stage MUST be registered LAST in the pipeline. Moving it before any of
-the three upstream stages will produce missing data and incorrect results.
+This stage MUST run after all three upstream stages (and before AlertStage).
+Moving it earlier will produce missing data and incorrect results.
 
 Pipeline position:
     processor.add_stage("detection", ...)  # 1st
     processor.add_stage("lanes",     ...)  # 2nd
     processor.add_stage("depth",     ...)  # 3rd
-    processor.add_stage("fusion",    ...)  # 4th — LAST
+    processor.add_stage("fusion",    ...)  # 4th
+    processor.add_stage("alerts",    ...)  # 5th — draws the risk overlay
 """
 
 from __future__ import annotations
@@ -25,34 +26,13 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import cv2
 import numpy as np
 
-from src.fusion.collision_estimator import (
-    CollisionEstimator,
-    RISK_DANGER,
-    RISK_CAUTION,
-    RISK_SAFE,
-)
+from src.fusion.collision_estimator import CollisionEstimator
 from src.fusion.object_history import ObjectHistoryTracker
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-# ── Visualization constants ──────────────────────────────────────────────────
-_RISK_COLORS: dict[str, tuple[int, int, int]] = {
-    RISK_SAFE:    (0, 210, 70),    # green
-    RISK_CAUTION: (0, 200, 255),   # yellow
-    RISK_DANGER:  (0, 60, 255),    # red
-}
-
-_FONT = cv2.FONT_HERSHEY_SIMPLEX
-_LABEL_SCALE = 0.42
-_LABEL_PAD = 3
-
-# Thicker box for in-ego-lane DANGER objects — the single most important signal
-_DANGER_EGO_BOX_THICKNESS = 4
-_NORMAL_BOX_THICKNESS = 2
 
 
 class CollisionFusionStage:
@@ -89,6 +69,7 @@ class CollisionFusionStage:
             ttc_danger_threshold=config.get("ttc_danger_threshold", 2.0),
             ttc_caution_threshold=config.get("ttc_caution_threshold", 4.0),
             min_history_points=config.get("min_history_points", 3),
+            max_closing_speed_mps=config.get("max_closing_speed_mps", 40.0),
         )
 
         # Frame counter for periodic stale-history cleanup
@@ -108,7 +89,6 @@ class CollisionFusionStage:
           2. Update distance histories with new observations
           3. Expire stale tracks periodically
           4. Run CollisionEstimator to compute risk for each object
-          5. Draw risk-coded visualization overlays
 
         Args:
             frame: BGR frame with existing overlays from prior stages.
@@ -119,11 +99,14 @@ class CollisionFusionStage:
             (frame, meta) — meta enriched with risk annotations on each
             tracked object.
         """
-        current_time = time.perf_counter()
+        # Frame capture time (video time for files) — NOT processing time.
+        current_time = meta.get("timestamp", time.perf_counter())
         self._frame_count += 1
 
         tracked_objects = meta.get("tracked_objects", [])
-        lane_lines = meta.get("lane_lines")
+        # The ego corridor always has both sides (detected or default lines);
+        # fall back to raw lane lines if the lane stage predates it.
+        lane_lines = meta.get("ego_lane") or meta.get("lane_lines")
 
         logger.debug(
             "[CollisionFusionStage] START — frame=%d  objects=%d  lane_lines=%s",
@@ -153,8 +136,8 @@ class CollisionFusionStage:
             lane_lines=lane_lines,
         )
 
-        # ── 4. Draw risk visualization ──────────────────────────────────
-        frame = self._draw_risk_overlays(frame, tracked_objects)
+        # Frame is returned untouched: AlertStage draws the risk-coloured
+        # boxes and labels, so they are not drawn twice.
 
         risk_counts = {}
         for obj in tracked_objects:
@@ -167,106 +150,3 @@ class CollisionFusionStage:
         )
 
         return frame, meta
-
-    @staticmethod
-    def _draw_risk_overlays(
-        frame: np.ndarray,
-        tracked_objects: list,
-    ) -> np.ndarray:
-        """
-        Draw risk-coded bounding box borders and info labels for each object.
-
-        - SAFE objects get green borders and labels.
-        - CAUTION objects get yellow borders with closing speed + TTC.
-        - DANGER + in_ego_lane objects get thick red borders (the single most
-          important visual signal in the whole system).
-
-        This replaces / overdraws the Day 2 default boxes with risk-colored ones.
-        """
-        for obj in tracked_objects:
-            risk_level = getattr(obj, "risk_level", RISK_SAFE)
-            in_ego_lane = getattr(obj, "in_ego_lane", False)
-            closing_speed = getattr(obj, "closing_speed_mps", None)
-            ttc = getattr(obj, "ttc_seconds", None)
-            distance = getattr(obj, "estimated_distance_m", None)
-
-            color = _RISK_COLORS.get(risk_level, _RISK_COLORS[RISK_SAFE])
-
-            # ── Box thickness: extra thick for DANGER + in ego lane ──────
-            if risk_level == RISK_DANGER and in_ego_lane:
-                thickness = _DANGER_EGO_BOX_THICKNESS
-            else:
-                thickness = _NORMAL_BOX_THICKNESS
-
-            # Draw the risk-colored bounding box (overdraws the detection box)
-            cv2.rectangle(
-                frame,
-                (obj.x1, obj.y1),
-                (obj.x2, obj.y2),
-                color,
-                thickness,
-            )
-
-            # ── Build the info label ─────────────────────────────────────
-            # Format: "Car #7 ~18m, closing 3.2 m/s, TTC 5.6s [SAFE]"
-            parts = [f"{obj.class_name.capitalize()} #{obj.track_id}"]
-
-            if distance is not None:
-                if distance < 10:
-                    parts.append(f"~{distance:.1f}m")
-                else:
-                    parts.append(f"~{distance:.0f}m")
-
-            if closing_speed is not None and closing_speed > 0.1:
-                parts.append(f"closing {closing_speed:.1f} m/s")
-
-            if ttc is not None:
-                parts.append(f"TTC {ttc:.1f}s")
-
-            parts.append(f"[{risk_level}]")
-
-            label = ", ".join(parts)
-
-            # ── Draw label background pill ───────────────────────────────
-            (tw, th), baseline = cv2.getTextSize(label, _FONT, _LABEL_SCALE, 1)
-
-            # Position: above the bounding box
-            lx = obj.x1
-            ly = max(obj.y1 - _LABEL_PAD, th + _LABEL_PAD * 2)
-
-            # Background
-            cv2.rectangle(
-                frame,
-                (lx, ly - th - _LABEL_PAD),
-                (lx + tw + _LABEL_PAD * 2, ly + baseline + _LABEL_PAD - 2),
-                color,
-                cv2.FILLED,
-            )
-
-            # Text (white on colored background for readability)
-            cv2.putText(
-                frame,
-                label,
-                (lx + _LABEL_PAD, ly),
-                _FONT,
-                _LABEL_SCALE,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-
-            # ── Extra visual emphasis for DANGER + in_ego_lane ───────────
-            # Draw a second, inner outline to make it stand out even more
-            if risk_level == RISK_DANGER and in_ego_lane:
-                # Pulsing effect: alternate intensity via frame count
-                # (a cheaper alternative to alpha-blending every frame)
-                inner_color = (0, 0, 255)  # pure red inner line
-                cv2.rectangle(
-                    frame,
-                    (obj.x1 + 3, obj.y1 + 3),
-                    (obj.x2 - 3, obj.y2 - 3),
-                    inner_color,
-                    2,
-                )
-
-        return frame

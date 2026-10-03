@@ -130,16 +130,20 @@ class CollisionEstimator:
         ttc_danger_threshold: float = 2.0,
         ttc_caution_threshold: float = 4.0,
         min_history_points: int = 3,
+        max_closing_speed_mps: float = 40.0,
     ) -> None:
         self._ttc_danger = ttc_danger_threshold
         self._ttc_caution = ttc_caution_threshold
         self._min_points = min_history_points
+        self._max_closing_speed = max_closing_speed_mps
 
         logger.info(
-            "CollisionEstimator ready (danger<%.1fs, caution<%.1fs, min_points=%d).",
+            "CollisionEstimator ready (danger<%.1fs, caution<%.1fs, min_points=%d, "
+            "max_closing_speed=%.0f m/s).",
             self._ttc_danger,
             self._ttc_caution,
             self._min_points,
+            self._max_closing_speed,
         )
 
     def estimate(
@@ -257,6 +261,18 @@ class CollisionEstimator:
         # so: closing_speed = -slope.
         closing_speed = -slope
 
+        # Physical plausibility gate: a relative closing speed faster than any
+        # real traffic situation (default 40 m/s = 144 km/h) is measurement
+        # noise — typically a distance jumping around near the horizon, where
+        # one pixel is many meters. Don't let it raise an alarm.
+        if abs(closing_speed) > self._max_closing_speed:
+            return CollisionRisk(
+                closing_speed_mps=None,
+                ttc_seconds=None,
+                risk_level=RISK_SAFE,
+                in_ego_lane=False,
+            )
+
         # Current distance is the most recent observation
         current_distance = dists[-1]
 
@@ -289,17 +305,18 @@ class CollisionEstimator:
     @staticmethod
     def _is_in_ego_lane(obj: Any, lane_lines: Optional[dict]) -> bool:
         """
-        Check if the object's horizontal center is between the left and right
-        ego lane lines.
+        Check if the object's ground contact point lies between the left and
+        right ego lane lines.
 
-        We evaluate the lane line positions at the object's vertical center
-        (y-coordinate) by linear interpolation along each lane line segment.
-        This handles the fact that lane lines converge toward the horizon —
-        checking at the object's y-level gives a much more accurate answer
-        than checking at a fixed y.
+        The contact point is the bottom-centre of the bounding box — where the
+        object touches the road, which is the surface the lane lines are drawn
+        on. (The box centre sits well above the road for tall vehicles, where
+        the converging lane lines are narrower, so it misjudges trucks.)
+        Lane x positions are evaluated at that row, since lane lines converge
+        toward the horizon.
 
-        Returns False if either lane line is undetected (we can't determine
-        lane membership with only one boundary).
+        Returns False if either lane line is missing (we can't determine lane
+        membership with only one boundary).
         """
         if lane_lines is None:
             return False
@@ -311,22 +328,26 @@ class CollisionEstimator:
         if left_line is None or right_line is None:
             return False
 
-        # Object horizontal center
         obj_cx = (obj.x1 + obj.x2) / 2.0
-        # Object vertical center — evaluate lane lines at this y
-        obj_cy = (obj.y1 + obj.y2) / 2.0
+        # The lines' bottom row is the lowest visible road row (ROI bottom).
+        # A box extending below it — onto the car's hood, often via the
+        # object's reflection — has no real ground contact there, and the
+        # extrapolated corridor would be far too wide.
+        road_bottom = max(left_line[1], right_line[1])
+        obj_bottom = float(min(obj.y2, road_bottom))
 
-        # Interpolate each lane line's x-position at obj_cy
-        left_x = _interpolate_lane_x(left_line, obj_cy)
-        right_x = _interpolate_lane_x(right_line, obj_cy)
+        left_x = _interpolate_lane_x(left_line, obj_bottom)
+        right_x = _interpolate_lane_x(right_line, obj_bottom)
 
         if left_x is None or right_x is None:
             return False
 
-        # Ensure left < right (lane lines might be stored in any order)
-        lo, hi = min(left_x, right_x), max(left_x, right_x)
+        # Above the point where the lines meet (the horizon) the corridor has
+        # zero width — nothing that far away is "in our lane" in a useful sense.
+        if left_x >= right_x:
+            return False
 
-        return lo <= obj_cx <= hi
+        return left_x <= obj_cx <= right_x
 
     @staticmethod
     def _downgrade_risk(risk: CollisionRisk) -> CollisionRisk:
@@ -355,12 +376,14 @@ def _interpolate_lane_x(
     line: tuple[int, int, int, int], target_y: float
 ) -> Optional[float]:
     """
-    Given a lane line segment (x1, y1, x2, y2), interpolate the x position
-    at *target_y* using linear interpolation.
+    Given a lane line (x1, y1, x2, y2), return its x position at *target_y*.
 
-    Returns None if the line is horizontal (Δy ≈ 0) or if target_y is
-    outside the line segment's y-range (extrapolation is unreliable for
-    short Hough line segments).
+    Lane lines are straight lines toward the vanishing point, so the line is
+    extrapolated beyond its endpoints rather than clamped: distant vehicles
+    sit above the drawn lane's top row, and clamping would evaluate the lane
+    there at its (wider) top-row width.
+
+    Returns None if the line is horizontal (Δy ≈ 0).
     """
     x1, y1, x2, y2 = line
 
@@ -368,15 +391,5 @@ def _interpolate_lane_x(
     if abs(dy) < 1e-6:
         return None  # horizontal line — can't interpolate in y
 
-    # Allow a small margin outside the segment for practical robustness
-    y_min = min(y1, y2)
-    y_max = max(y1, y2)
-
-    # Clamp target_y to the line segment's range instead of returning None.
-    # This handles objects that are slightly above/below the visible lane
-    # line segment — the lane boundary continues beyond what Hough detected,
-    # and clamping gives a reasonable approximation.
-    clamped_y = max(y_min, min(y_max, target_y))
-
-    t = (clamped_y - y1) / dy
+    t = (target_y - y1) / dy
     return x1 + t * (x2 - x1)

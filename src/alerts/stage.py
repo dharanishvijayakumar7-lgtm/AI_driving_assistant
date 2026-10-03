@@ -131,7 +131,7 @@ class AlertStage:
         )
 
         # ── 1. Evaluate alert state ──────────────────────────────────────
-        active_alert = self._manager.evaluate(tracked_objects)
+        active_alert = self._manager.evaluate(tracked_objects, now=meta.get("timestamp"))
 
         # ── 2. Redraw bounding boxes with context-sensitive labels ────────
         #    (This pass overdraws the Day 5 labels with the polished version)
@@ -141,11 +141,7 @@ class AlertStage:
         if active_alert is not None:
             frame = self._draw_banner(frame, active_alert)
 
-        # ── 4. Optionally blank the depth PIP region (demo mode) ─────────
-        if not self._viz["show_depth_panel"]:
-            frame = self._erase_depth_pip(frame, meta)
-
-        # ── 5. Write metadata ─────────────────────────────────────────────
+        # ── 4. Write metadata ─────────────────────────────────────────────
         meta["active_alert"] = active_alert
         meta["viz_config"] = self._viz
 
@@ -166,7 +162,9 @@ class AlertStage:
         active_alert: Optional[ActiveAlert],
     ) -> np.ndarray:
         """
-        Draw context-sensitive labels on top of Day 5's boxes.
+        Draw the final, context-sensitive box + label layer. This stage is the
+        only one that labels objects (detection draws plain boxes, fusion
+        draws nothing), so labels never stack on top of each other.
 
         Rules:
         - In-lane CAUTION or DANGER: full detail label (distance, speed, TTC,
@@ -179,6 +177,7 @@ class AlertStage:
         """
         # Alternate border opacity every 8 frames for a cheap pulse effect
         pulse_bright = (self._frame_count // 8) % 2 == 0
+        dim_labels: list[tuple] = []   # drawn after the loop in one blend
 
         for obj in tracked_objects:
             risk   = getattr(obj, "risk_level",          RISK_SAFE)
@@ -234,33 +233,37 @@ class AlertStage:
             lx = obj.x1
             ly = max(obj.y1 - _LABEL_PAD, th + _LABEL_PAD * 2)
 
-            # Fill the background only for critical objects; dim gets outline
-            if is_critical:
-                cv2.rectangle(
-                    frame,
-                    (lx, ly - th - _LABEL_PAD),
-                    (lx + tw + _LABEL_PAD * 2, ly + bl + _LABEL_PAD - 2),
-                    color, cv2.FILLED,
-                )
-                text_color = (255, 255, 255)
-            else:
-                # Semi-transparent dark pill for dim labels
-                pill = frame.copy()
-                cv2.rectangle(
-                    pill,
-                    (lx, ly - th - _LABEL_PAD),
-                    (lx + tw + _LABEL_PAD * 2, ly + bl + _LABEL_PAD - 2),
-                    (20, 20, 20), cv2.FILLED,
-                )
-                cv2.addWeighted(pill, 0.55, frame, 0.45, 0, frame)
-                text_color = (130, 130, 130)
-
-            cv2.putText(
-                frame, label,
-                (lx + _LABEL_PAD, ly),
-                _FONT, font_scale,
-                text_color, 1, cv2.LINE_AA,
+            pill_rect = (
+                (lx, ly - th - _LABEL_PAD),
+                (lx + tw + _LABEL_PAD * 2, ly + bl + _LABEL_PAD - 2),
             )
+
+            if is_critical:
+                # Solid risk-coloured pill, drawn immediately
+                cv2.rectangle(frame, *pill_rect, color, cv2.FILLED)
+                cv2.putText(
+                    frame, label,
+                    (lx + _LABEL_PAD, ly),
+                    _FONT, font_scale,
+                    (255, 255, 255), 1, cv2.LINE_AA,
+                )
+            else:
+                dim_labels.append((label, (lx + _LABEL_PAD, ly), pill_rect, font_scale))
+
+        # Semi-transparent dark pills for dim labels — all blended in ONE
+        # addWeighted pass (a full-frame copy per object was the bulk of
+        # this stage's cost on busy frames).
+        if dim_labels:
+            overlay = frame.copy()
+            for _, _, pill_rect, _ in dim_labels:
+                cv2.rectangle(overlay, *pill_rect, (20, 20, 20), cv2.FILLED)
+            cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+            for label, origin, _, font_scale in dim_labels:
+                cv2.putText(
+                    frame, label, origin,
+                    _FONT, font_scale,
+                    (150, 150, 150), 1, cv2.LINE_AA,
+                )
 
         return frame
 
@@ -319,26 +322,4 @@ class AlertStage:
                     (w - dw - 12, banner_y2 - 8),
                     _FONT, 0.42, _BANNER_RED, 1, cv2.LINE_AA)
 
-        return frame
-
-    @staticmethod
-    def _erase_depth_pip(frame: np.ndarray, meta: dict) -> np.ndarray:
-        """
-        In demo mode (show_depth_panel=False), black out the depth PIP region.
-
-        The DepthEstimationStage draws the PIP directly onto the frame before
-        this stage runs, so we can't prevent it from drawing — we can only
-        cover it. The PIP is always in the bottom-right corner at 25% scale
-        with a 10-pixel margin (matching depth/stage.py's _draw_pip_overlay).
-        """
-        h, w = frame.shape[:2]
-        scale  = 0.25
-        margin = 10
-        pip_w = int(w * scale)
-        pip_h = int(h * scale)
-        x1 = w - pip_w - margin
-        y1 = h - pip_h - margin
-        # Fill with a solid dark rectangle to erase the PIP
-        cv2.rectangle(frame, (x1 - 2, y1 - 2), (w - margin + 2, h - margin + 2),
-                      (18, 18, 18), cv2.FILLED)
         return frame

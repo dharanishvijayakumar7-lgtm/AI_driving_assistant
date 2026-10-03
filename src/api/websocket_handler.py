@@ -303,7 +303,7 @@ def _process_and_encode(
     if frame is None:
         return None
 
-    annotated_frame, frame_meta = processor.process(frame)
+    annotated_frame, frame_meta = processor.process(frame, timestamp=source.timestamp)
 
     if target_w and target_h:
         h, w = annotated_frame.shape[:2]
@@ -391,21 +391,6 @@ def _build_payload_json(
             )
         )
 
-    # ── Distance verification log (every 30 frames) ─────────────────────
-    # Prove that the JSON distance == the value baked into the video overlay.
-    # Both read from the same obj.estimated_distance_m attribute.
-    if frame_number % 30 == 1 and raw_objects:
-        dist_pairs = [
-            f"#{getattr(o, 'track_id', '?')}:"
-            f"attr={getattr(o, 'estimated_distance_m', None)}"
-            for o in raw_objects[:5]  # cap at 5 objects to avoid log spam
-        ]
-        logger.info(
-            "[Distance verify] frame=%d — obj distances (same value in JPEG overlay + JSON): %s",
-            frame_number,
-            "  ".join(dist_pairs),
-        )
-
     # ── 4. Extract alert ──────────────────────────────────────────────────
     raw_alert = frame_meta.get("active_alert")
     alert_schema: Optional[AlertSchema] = None
@@ -427,7 +412,7 @@ def _build_payload_json(
     # ── 6. Assemble payload ───────────────────────────────────────────────
     metadata = FrameMetadataSchema(
         frame_number=frame_number,
-        timestamp=time.perf_counter(),
+        timestamp=float(frame_meta.get("timestamp", time.perf_counter())),
         fps_current=round(fps, 2),
         lane_offset=lane_offset,
         tracked_objects=tracked_schemas,

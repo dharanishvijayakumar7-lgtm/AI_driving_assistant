@@ -114,16 +114,43 @@ lanes:
   # Gaussian blur kernel size (must be an odd number).
   blur_kernel_size: 5
 
-  # ROI trapezoid — four points as [x_fraction, y_fraction] of frame size.
-  # Order: bottom-left, bottom-right, top-right, top-left.
-  # Narrowed slightly from the Day 3 values so the bottom corners don't reach
-  # the extreme frame edges, which at 4K picked up road shoulders and barriers
-  # as false "left"/"right" lane candidates.
-  roi_trapezoid:
-    - [0.08, 1.00]   # bottom-left
-    - [0.92, 1.00]   # bottom-right
-    - [0.58, 0.60]   # top-right
-    - [0.42, 0.60]   # top-left
+  # ── Camera geometry (tune once per camera mounting) ──────────────────────
+  # Road vanishing point as [x_fraction, y_fraction] of the frame: where the
+  # lane markings meet on the horizon. Lane segments that don't point at it
+  # are rejected as noise (cracks, shadows, barriers, car edges), and it
+  # anchors the default ego corridor when markings aren't visible.
+  # Turn on debug_overlay below to see it drawn as a magenta cross.
+  #
+  # Presets for the two sample clips:
+  #   sample2.mp4 (low, wide-angle, no hood):  vanishing_point [0.51, 0.47]
+  #       roi_polygon [[0,1],[1,1],[1,0.66],[0.56,0.52],[0.44,0.52],[0,0.66]]
+  #   sample.mp4  (high mount, hood in view):  vanishing_point [0.50, 0.21]
+  #       roi_polygon [[0,0.56],[1,0.56],[1,0.42],[0.56,0.28],[0.44,0.28],[0,0.42]]
+  # (Also switch depth.camera_height_m / camera_hfov_deg — see depth below.)
+  vanishing_point: [0.51, 0.47]
+
+  # Max horizontal distance (fraction of frame width) by which a segment's
+  # extended line may miss the vanishing point and still count as a lane mark.
+  vp_tolerance: 0.08
+
+  # ROI polygon — [x_fraction, y_fraction] points of the road region searched
+  # for lane markings. Any number of points. The bottom edge must stay above
+  # the car's hood (if visible); the top edge must stay below the horizon.
+  # Wide-angle cameras need a wide polygon: their lane lines are shallow and
+  # leave the frame at the sides rather than at the bottom.
+  roi_polygon:
+    - [0.00, 1.00]   # bottom-left
+    - [1.00, 1.00]   # bottom-right
+    - [1.00, 0.66]   # right edge
+    - [0.56, 0.52]   # top-right
+    - [0.44, 0.52]   # top-left
+    - [0.00, 0.66]   # left edge
+
+  # Ego-lane corridor used when lane markings are NOT detected: straight lines
+  # from these x positions (fraction of width) at the ROI bottom up to the
+  # vanishing point. Keeps the in-ego-lane check (and so collision alerts)
+  # working on roads with faded or missing markings.
+  default_lane_bottom_x: [0.10, 0.90]
 
   # Hough transform.
   # At 1280x720: min_line_length=40 means a segment must span 40/1280=3.1% of
@@ -132,6 +159,19 @@ lanes:
   hough_threshold: 20
   hough_min_line_length: 40
   hough_max_line_gap: 80
+
+  # Minimum |slope| (dy/dx) for a lane segment. Wide-angle cameras see lane
+  # lines as shallow as ~0.25, so keep this lower than for a narrow dashcam.
+  min_abs_slope: 0.2
+
+  # Segments within this distance of each other (fraction of frame width,
+  # measured at the ROI bottom) belong to the same lane marking. Only the
+  # innermost marking on each side is used — the ego-lane boundary.
+  lane_cluster_tolerance: 0.08
+
+  # Drop a side's smoothed line after this many consecutive frames without a
+  # valid detection, so stale lines don't linger.
+  max_missed_frames: 15
 
   # Temporal smoothing (frames to average over).
   smoothing_frames: 7
@@ -146,6 +186,30 @@ lanes:
 # Day 4: Monocular Depth Estimation
 # ============================================================
 depth:
+  # How each object's distance is estimated:
+  #   "ground_plane" — distance = f · camera_height / (box_bottom − horizon_row),
+  #                    with the horizon taken from lanes.vanishing_point. Metric
+  #                    and stable for vehicles/pedestrians on a flat road.
+  #   "midas"        — calibration_scale / MiDaS relative inverse depth. Kept for
+  #                    comparison; on the sample clips it barely tracks real
+  #                    distance (MiDaS depth has an unknown scale AND shift).
+  # Objects at/above the horizon get no distance with ground_plane (beyond
+  # reliable range); MiDaS is only the fallback if there is no lane stage.
+  distance_method: "ground_plane"
+
+  # ── Camera calibration for ground_plane (tune once per camera) ──────────
+  # Measured from the sample2.mp4 footage: camera height from the apparent
+  # width of a 3.66 m US interstate lane, focal length from the spacing of
+  # dashed lane markings (one dash + gap = 40 ft = 12.2 m).
+  #   sample2.mp4: camera_height_m 1.16, camera_hfov_deg 41
+  #   sample.mp4:  camera_height_m 1.90, camera_hfov_deg 54
+  camera_height_m: 1.16
+  # Horizontal field of view of the (uncropped) video frame, in degrees.
+  camera_hfov_deg: 41
+
+  # Distances are clamped to this value (meters).
+  max_distance_m: 200
+
   # Model variant. Options:
   #   "midas_small"  — Fastest (~2 MB weights), good for real-time on CPU.
   #   "midas_hybrid" — Better quality (~120 MB), noticeably slower on CPU.
@@ -162,14 +226,16 @@ depth:
   # Inference device. "auto" detects CUDA if available, falls back to CPU.
   device: "auto"
 
-  # Heuristic scale factor for converting relative depth → pseudo-meters.
-  # This is NOT a physically derived calibration — it's a rough approximation.
-  # Tune it so that a car ~10 m ahead reads approximately "~10m" on screen.
-  # Typical values: 20–50 depending on camera FOV and mounting height.
-  calibration_scale: 30.0
+  # Heuristic scale for distance_method "midas" (and the fallback):
+  # pseudo_distance = calibration_scale / normalized_inverse_depth.
+  # NOT a physical calibration. 8.0 is the median fit against ground-plane
+  # distances on sample2.mp4 (the old value, 30, put most cars at ~200 m).
+  calibration_scale: 8.0
 
   # Show the colorized depth heatmap as a picture-in-picture overlay
-  # in the bottom-right corner of the display.
+  # in the bottom-right corner of the display. (visualization.show_depth_panel
+  # overrides this.) With distance_method "ground_plane" and the heatmap off,
+  # MiDaS doesn't run at all — a large CPU saving.
   show_heatmap_overlay: true
 
   # Run MiDaS inference only every N frames; reuse the cached depth map
@@ -205,6 +271,11 @@ fusion:
   # At least 3 points are needed for a meaningful linear fit — with
   # 1-2 noisy points the slope estimate is unreliable.
   min_history_points: 3
+
+  # Closing speeds above this (m/s) are treated as measurement noise, not
+  # a threat. 40 m/s = 144 km/h relative — beyond any same-direction traffic.
+  # Guards against distance jitter near the horizon (1 px = many meters).
+  max_closing_speed_mps: 40
 
 # ============================================================
 # Day 6: Alert System — Debounce, Priority & Sound

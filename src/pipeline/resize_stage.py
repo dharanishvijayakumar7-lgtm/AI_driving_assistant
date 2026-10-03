@@ -55,7 +55,14 @@ class FrameResizeStage:
 
     Example (main.py):
         processor.add_stage("resize", FrameResizeStage(width=1280, height=720))
+
+    It also publishes the resized, un-annotated frame as meta["clean_frame"]
+    and returns a separate copy as the drawing canvas (see FrameProcessor).
     """
+
+    # Tells FrameProcessor this stage sets meta["clean_frame"] itself, so the
+    # processor can skip its own (full-resolution) defensive copy.
+    provides_clean_frame = True
 
     def __init__(
         self,
@@ -76,16 +83,14 @@ class FrameResizeStage:
     def __call__(
         self, frame: np.ndarray, meta: dict[str, Any]
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        if self._width is None or self._height is None:
-            return frame, meta
-
         h, w = frame.shape[:2]
-        if w == self._width and h == self._height:
-            return frame, meta   # already the right size — skip the copy
+        if self._width and self._height and (w, h) != (self._width, self._height):
+            # INTER_LINEAR is the best tradeoff: faster than INTER_CUBIC, sharper
+            # than INTER_NEAREST. For downscaling video frames it is standard.
+            frame = cv2.resize(
+                frame, (self._width, self._height), interpolation=cv2.INTER_LINEAR
+            )
 
-        # INTER_LINEAR is the best tradeoff: faster than INTER_CUBIC, sharper
-        # than INTER_NEAREST. For downscaling video frames it is standard.
-        frame = cv2.resize(
-            frame, (self._width, self._height), interpolation=cv2.INTER_LINEAR
-        )
-        return frame, meta
+        # Analysis stages read the clean frame; overlays go on the copy.
+        meta["clean_frame"] = frame
+        return frame.copy(), meta

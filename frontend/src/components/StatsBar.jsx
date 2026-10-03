@@ -11,7 +11,7 @@
  *
  * Props:
  *   metadata         — FrameMetadataSchema or null
- *   connectionStatus — "connected" | "disconnected" | "reconnecting"
+ *   connectionStatus — "connected" | "disconnected" | "reconnecting" | "ended"
  */
 
 import React from 'react'
@@ -86,11 +86,13 @@ function ConnectionCell({ status }) {
     connected:    'Connected',
     disconnected: 'Disconnected',
     reconnecting: 'Reconnecting',
+    ended:        'Stream ended',
   }
   const colours = {
     connected:    'green',
     disconnected: 'red',
     reconnecting: 'amber',
+    ended:        'muted',
   }
   return (
     <span className={`stat-cell-value ${colours[status] ?? 'muted'}`} id="stats-connection-status">

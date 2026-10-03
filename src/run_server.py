@@ -37,7 +37,7 @@ if __name__ == "__main__":
     reload = os.environ.get("RELOAD", "true").lower() in ("1", "true", "yes")
 
     print(f"\n{'='*60}")
-    print("  AI Driving Assistant — Day 7 API Server")
+    print("  AI Driving Assistant — API Server")
     print(f"  Listening on : http://{host}:{port}")
     print(f"  WebSocket    : ws://{host}:{port}/ws/stream")
     print(f"  Swagger UI   : http://localhost:{port}/docs")

@@ -34,6 +34,7 @@ output/
 models/*.pt
 models/*.pth
 models/*.onnx
+*.pt
 
 # Logs
 logs/
@@ -42,3 +43,10 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Test / tooling caches
+.pytest_cache/

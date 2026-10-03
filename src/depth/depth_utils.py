@@ -192,3 +192,53 @@ def relative_to_pseudo_meters(
 
     # Clamp to a sensible range
     return max(0.5, min(200.0, pseudo_distance))
+
+
+def focal_length_px(frame_width: int, hfov_deg: float) -> float:
+    """Pinhole focal length in pixels for a horizontal field of view."""
+    return (frame_width / 2.0) / float(np.tan(np.radians(hfov_deg) / 2.0))
+
+
+def ground_plane_distance(
+    y_bottom: float,
+    horizon_y: float,
+    focal_px: float,
+    camera_height_m: float,
+    min_px_below_horizon: float = 3.0,
+    max_distance_m: float = 200.0,
+) -> Optional[float]:
+    """
+    Distance to an object standing on a flat road, from its ground contact row.
+
+    A camera at height H looking along a flat road sees a ground point at
+    distance Z on image row  y = horizon_y + f·H / Z  (pinhole model), so
+
+        Z = f · H / (y_bottom − horizon_y)
+
+    where y_bottom is the bottom edge of the object's bounding box (where its
+    wheels/feet touch the road). This is the classic single-camera ranging
+    method used in production ADAS (Stein, Mano & Shashua, "Vision-based ACC
+    with a single camera", IEEE IV 2003). Unlike a monocular depth network,
+    which predicts inverse depth only up to an unknown scale AND shift, it
+    has a fixed metric scale once the camera is calibrated.
+
+    Accuracy: a ±1 px error in y_bottom is a relative error of
+    1 / (y_bottom − horizon_y), so it is precise up close (where TTC matters)
+    and coarse near the horizon. Assumes a flat road; hills bias it.
+
+    Args:
+        y_bottom:             Bounding-box bottom row (pixels).
+        horizon_y:            Horizon row (the vanishing point's y, pixels).
+        focal_px:             Focal length in pixels at this frame width.
+        camera_height_m:      Camera height above the road in meters.
+        min_px_below_horizon: Rows closer than this to the horizon are too
+                              ill-conditioned to range (returns None).
+        max_distance_m:       Upper clamp.
+
+    Returns:
+        Distance in meters, or None if the contact point is at/above the horizon.
+    """
+    dy = y_bottom - horizon_y
+    if dy < min_px_below_horizon:
+        return None
+    return float(min(focal_px * camera_height_m / dy, max_distance_m))

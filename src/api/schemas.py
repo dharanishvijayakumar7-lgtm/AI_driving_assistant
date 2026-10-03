@@ -25,7 +25,7 @@ Schema hierarchy (one message per frame):
     ├── frame_b64          str          # JPEG encoded as base64
     ├── metadata           FrameMetadataSchema
     │   ├── frame_number   int
-    │   ├── timestamp      float        # time.perf_counter() at frame capture
+    │   ├── timestamp      float        # frame capture time (s): video position for files
     │   ├── fps_current    float
     │   ├── lane_offset    float | None # normalized offset [-1, 1], 0 = centered
     │   ├── active_alert   AlertSchema | None
@@ -165,7 +165,10 @@ class FrameMetadataSchema(BaseModel):
         description="Monotonically increasing frame counter (resets to 0 on reconnect)."
     )
     timestamp: float = Field(
-        description="time.perf_counter() value at the moment the raw frame was captured."
+        description=(
+            "Frame capture time in seconds: position in the video for file "
+            "sources, time.perf_counter() for webcams."
+        )
     )
     fps_current: float = Field(
         description="Smoothed real-time FPS estimate, updated every 15 frames."

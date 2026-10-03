@@ -125,9 +125,9 @@ class VehicleTracker:
             sv.Detections with .tracker_id array filled in.
             Detections that could not be matched to any track are dropped.
         """
-        if len(detections) == 0:
-            return detections
-
+        # Empty frames are still passed to the tracker: that is what ages
+        # unmatched tracks toward deletion (lost_track_buffer). Skipping them
+        # would keep a vanished object's track alive indefinitely.
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", FutureWarning)

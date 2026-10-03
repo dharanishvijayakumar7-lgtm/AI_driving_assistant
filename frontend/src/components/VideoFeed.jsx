@@ -8,7 +8,7 @@
  *
  * Props:
  *   frameSrc         — data URI (base64 JPEG), or null when disconnected
- *   connectionStatus — "connected" | "disconnected" | "reconnecting"
+ *   connectionStatus — "connected" | "disconnected" | "reconnecting" | "ended"
  *   frameNumber      — monotonically increasing frame counter from metadata
  */
 
